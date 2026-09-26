@@ -44,11 +44,11 @@ all: $(OUTPUT)
 $(BUILD):
 	@mkdir -p $@
 
-$(BUILD)/cardengine.ld: cardengine.ld.in | $(BUILD)
+$(BUILD)/cardengine.ld: cardengine.ld.in $(CURDIR)/../../common/include/ra_engine.h | $(BUILD)
 	$(CC) -E -P -x c -DRA_LINKER_SCRIPT $(INCLUDE) $< -o $@
 
 $(BUILD)/%.o: %.c | $(BUILD)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 $(BUILD)/%.o: %.s | $(BUILD)
 	$(CC) -x assembler-with-cpp $(ASFLAGS) -c $< -o $@
@@ -62,3 +62,5 @@ $(OUTPUT): $(BUILD)/$(TARGET).elf
 
 clean:
 	@rm -rf $(BUILD) $(OUTPUT)
+
+-include $(OBJECTS:.o=.d)

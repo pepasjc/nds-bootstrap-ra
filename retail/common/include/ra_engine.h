@@ -8,9 +8,13 @@
 // RetroAchievements on real hardware (DS games on DSi, SD mode).
 //
 // The loader stages everything in ramDump.bin, which a DSi RAM dump only
-// fills to 16MB; the ARM7 card engine reads it into a 512KB block of main
-// RAM that the ROM cache skips, and runs the rcheevos engine from there
-// every VBlank.
+// fills to 16MB; the ARM7 card engine reads it into a 512KB block of the
+// DSi's extra RAM that the ROM cache skips, and runs the rcheevos engine
+// from there every VBlank.
+//
+// The block is addressed through the 0x0C000000 mirror, like the ROM cache:
+// DS-mode games see 4MB repeated across 0x02000000-0x02FFFFFF, so
+// 0x02E00000 would be the game's own RAM at 0x02200000.
 //
 // Region / staging layout (same offsets in both):
 //   +0x00000  RaBootHeader
@@ -18,8 +22,8 @@
 //   +0x20000  achievement set text (see ra_connect.render_set)
 //   +0x40000  engine heap (region only), stack at the top
 
-#define RA_REGION             0x02E00000
-#define RA_ROM_CACHE_SKIP     0x0CE00000 // RA_REGION in the ROM cache's mirror
+#define RA_REGION             0x0CE00000
+#define RA_ROM_CACHE_SKIP     RA_REGION
 #define RA_REGION_SIZE        0x80000
 #define RA_ENGINE_OFFSET      0x800
 #define RA_ENGINE_MAX         (0x20000 - RA_ENGINE_OFFSET)
