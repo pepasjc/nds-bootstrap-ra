@@ -1817,6 +1817,41 @@ void myIrqHandlerFIFO(void) {
 }
 
 
+// RetroAchievements probe (milestone 1): once a second, log a few values to
+// a ring at the tail of ramDump.bin, which a DSi RAM dump (16MB) never reaches.
+#define RA_LOG_OFFSET 0x01FF0000
+#define RA_LOG_RECORDS 2048 // 32 bytes each, 64KB
+static const u32 raWatch[3] = {0x02000000, 0x02100000, 0x02200000};
+static u32 raFrame = 0;
+static u32 raSeq = 0;
+static u32 raRecord[8];
+
+static void raProbe(void) {
+	if (++raFrame % 60 != 0 || !driveInited || readOngoing) {
+		return;
+	}
+	if (!(valueBits & bootstrapOnFlashcard) && isSdEjected()) {
+		return;
+	}
+	// Never spin here: the holder may be the code this IRQ interrupted.
+	if (!tryLockMutex(&saveMutex)) {
+		return;
+	}
+	raRecord[0] = 0x31544152; // 'RAT1'
+	raRecord[1] = raSeq;
+	raRecord[2] = raFrame;
+	raRecord[3] = REG_KEYINPUT;
+	raRecord[4] = *(u32*)((valueBits & isSdk5) ? 0x02FFFC3C : 0x027FFC3C); // game's frame count
+	for (int i = 0; i < 3; i++) {
+		raRecord[5+i] = *(vu32*)raWatch[i];
+	}
+	sdmmc_set_ndma_slot(4);
+	fileWrite((char*)raRecord, &ramDumpFile, RA_LOG_OFFSET + (raSeq % RA_LOG_RECORDS) * sizeof(raRecord), sizeof(raRecord));
+	sdmmc_set_ndma_slot(0);
+	raSeq++;
+	unlockMutex(&saveMutex);
+}
+
 void myIrqHandlerVBlank(void) {
   while (1) {
 	#ifdef DEBUG		
@@ -1835,6 +1870,8 @@ void myIrqHandlerVBlank(void) {
 		volatile void (*cheatEngine)() = (volatile void*)cheatEngineAddr+4;
 		(*cheatEngine)();
 	}
+
+	raProbe();
 
 	if (language >= 0 && language <= 7 && languageTimer < 60*3) {
 		// Change language
