@@ -44,6 +44,8 @@
 #include "nds_header.h"
 #include "igm_text.h"
 #include "ra_popup.h"
+#include "ra_engine.h"
+#include <nds/arm7/clock.h>
 
 #ifndef TWLSDK
 // Patcher
@@ -1838,20 +1840,100 @@ void myIrqHandlerFIFO(void) {
 }
 
 
-// RetroAchievements probe (milestone 1): once a second, log a few values to
-// a ring at the tail of ramDump.bin, which a DSi RAM dump (16MB) never reaches.
-#define RA_LOG_OFFSET 0x01FF0000
-#define RA_LOG_RECORDS 2048 // 32 bytes each, 64KB
-static const u32 raWatch[3] = {0x02000000, 0x02100000, 0x02200000};
+#ifndef TWLSDK // no room in the DSi-enhanced engines; DS games only for now
+// RetroAchievements (see ra_engine.h): load the engine and set staged in
+// ramDump.bin by the loader, evaluate every VBlank, record unlocks in a ring
+// there and pop them up.  Once a second a probe record with the engine's
+// stats goes to another ring, for diagnosis.
+#define RA_PROBE_RECORDS 2048 // 32 bytes each, 64KB
+#define RA_PENDING_MAX 8
 static u32 raFrame = 0;
 static u32 raSeq = 0;
 static u32 raRecord[8];
+static int raState = 0; // 0 = not loaded yet, 1 = running, -1 = off for this game
+static struct RaEngineHeader* const raEngine = (struct RaEngineHeader*)(RA_REGION + RA_ENGINE_OFFSET);
+static struct RaHost raHost;
+static struct RaUnlockRecord raUnlock;
+static u32 raUnlockSeq = 0;
+static u32 raPendingId[RA_PENDING_MAX];
+static u32 raPendingPoints[RA_PENDING_MAX];
+static u32 raPendingFrame[RA_PENDING_MAX];
+static int raPendingCount = 0;
 
-static void raProbe(void) {
-	if (++raFrame == 60*20) {
-		raQueuePopup("Popup test - Yep, It Ain't Moving", 1); // until rcheevos drives it
+static void raUnlocked(u32 achievementId, u32 points, const char* title) {
+	if (raPendingCount < RA_PENDING_MAX) {
+		raPendingId[raPendingCount] = achievementId;
+		raPendingPoints[raPendingCount] = points;
+		raPendingFrame[raPendingCount] = raFrame;
+		raPendingCount++;
 	}
-	if (raFrame % 60 != 0 || !driveInited || readOngoing) {
+	raQueuePopup(title, points);
+}
+
+// Called with saveMutex held and the SD free
+static void raLoad(void) {
+	struct RaBootHeader* boot = (struct RaBootHeader*)RA_REGION;
+	raState = -1;
+	fileRead((char*)boot, &ramDumpFile, RA_DUMP_BOOT_OFFSET, RA_ENGINE_OFFSET);
+	if (boot->magic != RA_BOOT_MAGIC || boot->engineSize == 0 || boot->engineSize > RA_ENGINE_MAX
+	 || boot->setSize == 0 || boot->setSize > RA_SET_MAX) {
+		return;
+	}
+	fileRead((char*)raEngine, &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_ENGINE_OFFSET, boot->engineSize);
+	fileRead((char*)(RA_REGION + RA_SET_OFFSET), &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_SET_OFFSET, boot->setSize);
+	if (raEngine->magic != RA_ENGINE_MAGIC) {
+		return;
+	}
+	raUnlockSeq = boot->unlockSeq;
+	raHost.unlocked = raUnlocked;
+	raHost.boot = boot;
+	raHost.set = (char*)(RA_REGION + RA_SET_OFFSET);
+	raHost.setSize = boot->setSize;
+	if (raEngine->init(&raHost) > 0) {
+		raState = 1;
+	}
+}
+
+// Called with saveMutex held and the SD free
+static void raWriteUnlocks(void) {
+	for (int i = 0; i < raPendingCount; i++) {
+		toncset(&raUnlock, 0, sizeof(raUnlock));
+		raUnlock.magic = RA_UNLOCK_MAGIC;
+		raUnlock.seq = raUnlockSeq;
+		raUnlock.achievementId = raPendingId[i];
+		raUnlock.gameId = raEngine->gameId;
+		raUnlock.points = raPendingPoints[i];
+		raUnlock.frame = raPendingFrame[i];
+		rtcGetTimeAndDate(raUnlock.rtc);
+		tonccpy(raUnlock.md5, raEngine->md5, sizeof(raUnlock.md5));
+		fileWrite((char*)&raUnlock, &ramDumpFile, RA_DUMP_UNLOCK_OFFSET + (raUnlockSeq % RA_UNLOCK_RECORDS) * sizeof(raUnlock), sizeof(raUnlock));
+		raUnlockSeq++;
+	}
+	raPendingCount = 0;
+}
+
+static void raWriteProbe(void) {
+	const struct RaStats* stats = (raState == 1) ? raEngine->stats : NULL;
+	raRecord[0] = 0x32544152; // 'RAT2'
+	raRecord[1] = raSeq;
+	raRecord[2] = raFrame;
+	raRecord[3] = REG_KEYINPUT | (raState << 16);
+	raRecord[4] = stats ? (stats->achievements | (stats->parsed << 16)) : 0;
+	raRecord[5] = stats ? (stats->parseErrors | (stats->unlocks << 16)) : 0;
+	raRecord[6] = stats ? (stats->lastLines | (stats->maxLines << 16)) : 0;
+	raRecord[7] = stats ? stats->heapUsed : 0;
+	fileWrite((char*)raRecord, &ramDumpFile, RA_DUMP_PROBE_OFFSET + (raSeq % RA_PROBE_RECORDS) * sizeof(raRecord), sizeof(raRecord));
+	raSeq++;
+}
+
+static void raVBlank(void) {
+	raFrame++;
+	if (raState == 1) {
+		raEngine->frame();
+	}
+
+	const bool probeDue = (raFrame % 60 == 0);
+	if (!driveInited || readOngoing || !(raState == 0 || raPendingCount > 0 || probeDue)) {
 		return;
 	}
 	if (!(valueBits & bootstrapOnFlashcard) && isSdEjected()) {
@@ -1861,20 +1943,22 @@ static void raProbe(void) {
 	if (!tryLockMutex(&saveMutex)) {
 		return;
 	}
-	raRecord[0] = 0x31544152; // 'RAT1'
-	raRecord[1] = raSeq;
-	raRecord[2] = raFrame;
-	raRecord[3] = REG_KEYINPUT;
-	raRecord[4] = *(u32*)((valueBits & isSdk5) ? 0x02FFFC3C : 0x027FFC3C); // game's frame count
-	for (int i = 0; i < 3; i++) {
-		raRecord[5+i] = *(vu32*)raWatch[i];
-	}
 	sdmmc_set_ndma_slot(4);
-	fileWrite((char*)raRecord, &ramDumpFile, RA_LOG_OFFSET + (raSeq % RA_LOG_RECORDS) * sizeof(raRecord), sizeof(raRecord));
+	if (raState == 0) {
+		raLoad();
+	}
+	if (raPendingCount > 0) {
+		raWriteUnlocks();
+	}
+	if (probeDue) {
+		raWriteProbe();
+	}
 	sdmmc_set_ndma_slot(0);
-	raSeq++;
 	unlockMutex(&saveMutex);
 }
+#else
+static inline void raVBlank(void) {}
+#endif
 
 void myIrqHandlerVBlank(void) {
   while (1) {
@@ -1895,7 +1979,7 @@ void myIrqHandlerVBlank(void) {
 		(*cheatEngine)();
 	}
 
-	raProbe();
+	raVBlank();
 
 	if (language >= 0 && language <= 7 && languageTimer < 60*3) {
 		// Change language

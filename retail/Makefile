@@ -113,7 +113,7 @@ bootloader2:
 	@$(MAKE) -C bootloader2
 
 #---------------------------------------------------------------------------------		
-bootloaderi: cardenginei_arm7 cardenginei_arm7_alt cardenginei_arm7_twlsdk cardenginei_arm7_twlsdk3 cardenginei_arm7_dsiware cardenginei_arm7_dsiware3 cardenginei_arm7_cheat cardenginei_arm9_colorlut cardenginei_arm9_igm cardenginei_arm9 cardenginei_arm9_gsdd cardenginei_arm9_dldi cardenginei_arm9_gsdd_dldi cardenginei_arm9_twlsdk cardenginei_arm9_twlsdk3 cardenginei_arm9_twlsdk_dldi cardenginei_arm9_twlsdk3_dldi cardenginei_arm9_dsiware cardenginei_arm9_dsiware3
+bootloaderi: cardenginei_arm7 cardenginei_arm7_alt cardenginei_arm7_twlsdk cardenginei_arm7_twlsdk3 cardenginei_arm7_dsiware cardenginei_arm7_dsiware3 cardenginei_arm7_cheat cardenginei_arm7_ra cardenginei_arm9_colorlut cardenginei_arm9_igm cardenginei_arm9 cardenginei_arm9_gsdd cardenginei_arm9_dldi cardenginei_arm9_gsdd_dldi cardenginei_arm9_twlsdk cardenginei_arm9_twlsdk3 cardenginei_arm9_twlsdk_dldi cardenginei_arm9_twlsdk3_dldi cardenginei_arm9_dsiware cardenginei_arm9_dsiware3
 	@$(MAKE) -C bootloaderi
 
 #---------------------------------------------------------------------------------		
@@ -224,6 +224,9 @@ cardenginei_arm7_dsiware3:
 cardenginei_arm7_cheat:
 	@$(MAKE) -C cardenginei/arm7_cheat
 
+cardenginei_arm7_ra:
+	@$(MAKE) -C cardenginei/arm7_ra
+
 #---------------------------------------------------------------------------------		
 cardenginei_arm9_colorlut:
 	@$(MAKE) -C cardenginei/arm9_colorlut
@@ -328,6 +331,7 @@ clean:
 	@$(MAKE) -C cardenginei/arm7_dsiware clean
 	@$(MAKE) -C cardenginei/arm7_dsiware3 clean
 	@$(MAKE) -C cardenginei/arm7_cheat clean
+	@$(MAKE) -C cardenginei/arm7_ra clean
 	@$(MAKE) -C cardenginei/arm7_cheatonly clean
 	@$(MAKE) -C cardenginei/arm9_colorlut clean
 	@$(MAKE) -C cardenginei/arm9_igm clean

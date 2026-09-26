@@ -72,6 +72,7 @@ extern char patchOffsetCacheFilePath[64];
 extern std::string wideCheatFilePath;
 extern std::string cheatFilePath;
 extern std::string ramDumpPath;
+extern void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath);
 extern std::string srParamsFilePath;
 extern std::string screenshotPath;
 extern std::string apFixOverlaysPath;
@@ -2849,6 +2850,9 @@ int loadFromSD(configuration* conf, const char *bootstrapPath) {
 
 	// Create RAM dump binary
 	createRamDumpBin(conf);
+
+	// Stage RetroAchievements for the card engine
+	raPrepareBoot(conf, ramDumpPath);
 
 	// Create AP-fixed overlay binary
 	createApFixOverlayBin(conf);

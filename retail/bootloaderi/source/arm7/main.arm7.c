@@ -71,6 +71,7 @@
 #include "common.h"
 #include "igm_text.h"
 #include "locations.h"
+#include "ra_engine.h"
 #include "value_bits.h"
 #include "loading_screen.h"
 #include "unpatched_funcs.h"
@@ -867,6 +868,8 @@ bool romLocationAdjust(const tNDSHeader* ndsHeader, const bool laterSdk, const b
 		*romLocation += 0x4000;
 	} else if (*romLocation == 0x0CFE0000 && !ntrType) {
 		*romLocation += 0x20000;
+	} else if (*romLocation+blockSize > RA_ROM_CACHE_SKIP && *romLocation < RA_ROM_CACHE_SKIP+RA_REGION_SIZE) {
+		*romLocation = RA_ROM_CACHE_SKIP+RA_REGION_SIZE; // RetroAchievements engine (ra_engine.h)
 	} else if (*romLocation == 0x0D000000-blockSize) {
 		*romLocation += blockSize;
 	}
@@ -898,7 +901,7 @@ static bool isROMLoadableInRAM(const tDSiHeader* dsiHeader, const tNDSHeader* nd
 			wramSize += 0x8000; // Shared 32KB of WRAM is available for ARM9 to use
 			sharedWramEnabled = true;
 		}
-		u32 romSizeLimit = (dsiModeConfirmed ? 0x00800000 : retail_CACHE_ADRESS_SIZE);
+		u32 romSizeLimit = (dsiModeConfirmed ? 0x00800000 : retail_CACHE_ADRESS_SIZE) - RA_REGION_SIZE;
 		if (consoleModel > 0) {
 			romSizeLimit += 0x01000000;
 		}
