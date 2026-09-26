@@ -18,7 +18,10 @@ MAGIC = 0x31544152
 
 def main(path: str) -> int:
     with open(path, "rb") as fh:
-        fh.seek(OFFSET)
+        # Accept the whole ramDump.bin or just its 64KB tail
+        # (curl -r 33488896-33554431 ftp://.../ramDump.bin).
+        fh.seek(0, 2)
+        fh.seek(0 if fh.tell() == RECORDS * SIZE else OFFSET)
         blob = fh.read(RECORDS * SIZE)
     rows = []
     for i in range(len(blob) // SIZE):
