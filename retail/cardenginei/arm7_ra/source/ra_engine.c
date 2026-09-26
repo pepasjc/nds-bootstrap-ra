@@ -3,15 +3,16 @@
 
 	Loaded into RA_REGION with the game's achievement set.  The card engine
 	calls init() once and frame() every VBlank (through ra_entry.s, which
-	switches to this region's own stack).  Achievements are parsed a few per
-	frame, then every loaded trigger is evaluated against main RAM.
+	switches to this region's own stack).  Achievements are activated in an
+	rc_runtime a few per frame; the runtime shares memory references between
+	them, so each address is read once a frame however many use it.
 */
 
 #include <string.h>
 #include <stdlib.h>
 #include <nds/ndstypes.h>
 
-#include "rc_runtime_types.h"
+#include "rc_runtime.h"
 #include "ra_engine.h"
 
 #define RA_MAX_ACHIEVEMENTS 512
@@ -23,6 +24,7 @@ extern void raFrameStub(void);
 
 struct RaStats raStats;
 static struct RaAchievement achievements[RA_MAX_ACHIEVEMENTS];
+static rc_runtime_t runtime;
 
 struct RaEngineHeader raEngineHeader __attribute__((section(".raheader"), used)) = {
 	RA_ENGINE_MAGIC,
@@ -41,24 +43,53 @@ static u32 achievementCount;
 static const struct RaHost* host;
 
 // ---------------------------------------------------------------------------
-// Heap: rcheevos only allocates while parsing, so a bump allocator will do.
+// Heap.  rcheevos allocates while activating achievements: the kept
+// trigger buffers plus scratch space it frees straight away, newest first.
+// So: a bump allocator whose top blocks are given back once freed.
 
-static u8* heapPtr = (u8*)(RA_REGION + RA_HEAP_OFFSET);
+struct Block {
+	struct Block* prev;
+	u32 size;  // payload bytes
+	u32 freed;
+	u32 pad;
+};
+
+static u8* const heapStart = (u8*)(RA_REGION + RA_HEAP_OFFSET);
 static u8* const heapEnd = (u8*)(RA_REGION + RA_REGION_SIZE - RA_STACK_SIZE);
+static u8* heapPtr;
+static struct Block* heapTop;
+
+static void heapInit(void) {
+	heapPtr = heapStart;
+	heapTop = NULL;
+}
 
 void* malloc(size_t size) {
 	size = (size + 7) & ~7;
-	if (heapPtr + size > heapEnd) {
+	if (heapPtr + sizeof(struct Block) + size > heapEnd) {
 		return NULL;
 	}
-	void* p = heapPtr;
-	heapPtr += size;
-	raStats.heapUsed = heapPtr - (u8*)(RA_REGION + RA_HEAP_OFFSET);
-	return p;
+	struct Block* b = (struct Block*)heapPtr;
+	b->prev = heapTop;
+	b->size = size;
+	b->freed = 0;
+	heapTop = b;
+	heapPtr += sizeof(struct Block) + size;
+	if ((u32)(heapPtr - heapStart) > raStats.heapUsed) {
+		raStats.heapUsed = heapPtr - heapStart;
+	}
+	return b + 1;
 }
 
 void free(void* p) {
-	(void)p;
+	if (!p) {
+		return;
+	}
+	((struct Block*)p - 1)->freed = 1;
+	while (heapTop && heapTop->freed) {
+		heapPtr = (u8*)heapTop;
+		heapTop = heapTop->prev;
+	}
 }
 
 void* calloc(size_t count, size_t size) {
@@ -70,11 +101,21 @@ void* calloc(size_t count, size_t size) {
 }
 
 void* realloc(void* old, size_t size) {
+	if (!old) {
+		return malloc(size);
+	}
+	struct Block* b = (struct Block*)old - 1;
+	size = (size + 7) & ~7;
+	if (b == heapTop && (u8*)old + size <= heapEnd) {
+		// Newest block: grow in place
+		b->size = size;
+		heapPtr = (u8*)old + size;
+		return old;
+	}
 	void* p = malloc(size);
-	if (p && old) {
-		// The old block's size is unknown; it lies below p in the same heap.
-		size_t avail = (u8*)p - (u8*)old;
-		memcpy(p, old, avail < size ? avail : size);
+	if (p) {
+		memcpy(p, old, b->size < size ? b->size : size);
+		free(old);
 	}
 	return p;
 }
@@ -151,6 +192,8 @@ extern char __bss_start[], __bss_end[];
 int raInit(const struct RaHost* h) {
 	// Only code and data are loaded; the rest of the region is stale RAM.
 	memset(__bss_start, 0, __bss_end - __bss_start);
+	heapInit();
+	rc_runtime_init(&runtime);
 	host = h;
 	achievementCount = 0;
 
@@ -181,16 +224,23 @@ int raInit(const struct RaHost* h) {
 
 static u32 parsedCount;
 
-static void parseSome(void) {
+static struct RaAchievement* findAchievement(u32 id) {
+	for (u32 i = 0; i < achievementCount; i++) {
+		if (achievements[i].id == id) {
+			return &achievements[i];
+		}
+	}
+	return NULL;
+}
+
+static void activateSome(void) {
 	for (int i = 0; i < PARSE_PER_FRAME && parsedCount < achievementCount; i++) {
 		struct RaAchievement* a = &achievements[parsedCount++];
 		if (a->status != RA_LOCKED) {
 			continue;
 		}
-		int size = rc_trigger_size(a->memaddr);
-		void* buffer = size > 0 ? malloc(size) : NULL;
-		a->trigger = buffer ? rc_parse_trigger(buffer, a->memaddr, NULL, 0) : NULL;
-		if (a->trigger) {
+		if (rc_runtime_activate_achievement(&runtime, a->id, a->memaddr, NULL, 0) == RC_OK) {
+			a->trigger = rc_runtime_get_achievement(&runtime, a->id);
 			raStats.parsed++;
 		} else {
 			a->status = RA_UNSUPPORTED;
@@ -199,25 +249,27 @@ static void parseSome(void) {
 	}
 }
 
+static void onEvent(const rc_runtime_event_t* event) {
+	if (event->type != RC_RUNTIME_EVENT_ACHIEVEMENT_TRIGGERED) {
+		return;
+	}
+	struct RaAchievement* a = findAchievement(event->id);
+	rc_runtime_deactivate_achievement(&runtime, event->id);
+	if (a && a->status == RA_LOCKED) {
+		a->status = RA_UNLOCKED_NOW;
+		raStats.unlocks++;
+		host->unlocked(a->id, a->points, a->title);
+	}
+}
+
 void raFrame(void) {
 	const u16 start = REG_VCOUNT;
 	raStats.frames++;
 
 	if (parsedCount < achievementCount) {
-		parseSome();
+		activateSome();
 	}
-
-	for (u32 i = 0; i < parsedCount; i++) {
-		struct RaAchievement* a = &achievements[i];
-		if (a->status != RA_LOCKED || !a->trigger) {
-			continue;
-		}
-		if (rc_evaluate_trigger((rc_trigger_t*)a->trigger, peek, NULL, NULL) == RC_TRIGGER_STATE_TRIGGERED) {
-			a->status = RA_UNLOCKED_NOW;
-			raStats.unlocks++;
-			host->unlocked(a->id, a->points, a->title);
-		}
-	}
+	rc_runtime_do_frame(&runtime, onEvent, peek, NULL, NULL);
 
 	const u16 now = REG_VCOUNT;
 	const u32 lines = (now >= start) ? (u32)(now - start) : (u32)(now + 263 - start);

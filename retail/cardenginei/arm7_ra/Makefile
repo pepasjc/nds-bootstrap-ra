@@ -16,9 +16,9 @@ BUILD		:=	build
 TARGET		:=	cardenginei_arm7_ra
 OUTPUT		:=	$(CURDIR)/../../nitrofiles/$(TARGET).bin
 
-RC_SOURCES	:=	alloc.c condition.c condset.c memref.c operand.c trigger.c value.c
+RC_SOURCES	:=	alloc.c condition.c condset.c format.c lboard.c memref.c operand.c richpresence.c runtime.c trigger.c value.c
 SOURCES		:=	$(wildcard source/*.c) $(wildcard source/*.s) \
-				$(addprefix $(RCHEEVOS)/src/rcheevos/,$(RC_SOURCES)) 				$(RCHEEVOS)/src/rc_util.c
+				$(addprefix $(RCHEEVOS)/src/rcheevos/,$(RC_SOURCES)) 				$(RCHEEVOS)/src/rc_util.c $(RCHEEVOS)/src/rc_compat.c $(RCHEEVOS)/src/rhash/md5.c
 
 INCLUDE		:=	-I$(CURDIR)/../../common/include -I$(LIBNDS)/include \
 				-I$(RCHEEVOS)/include -I$(RCHEEVOS)/src
@@ -34,7 +34,7 @@ LDFLAGS		:=	-nostartfiles -T $(BUILD)/cardengine.ld $(ARCH) -Wl,--gc-sections \
 
 OBJECTS		:=	$(addprefix $(BUILD)/,$(addsuffix .o,$(notdir $(basename $(SOURCES)))))
 
-vpath %.c source $(RCHEEVOS)/src/rcheevos $(RCHEEVOS)/src
+vpath %.c source $(RCHEEVOS)/src/rcheevos $(RCHEEVOS)/src $(RCHEEVOS)/src/rhash
 vpath %.s source
 
 .PHONY: all clean
