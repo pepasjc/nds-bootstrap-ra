@@ -13,6 +13,7 @@
 #include "cardengine_header_arm9.h"
 #include "nds_header.h"
 #include "tonccpy.h"
+#include "ra_popup.h"
 
 void DC_InvalidateRange(const void *base, u32 size);
 void DC_FlushRange(const void *base, u32 size);
@@ -849,6 +850,70 @@ static void ramViewer(void) {
 	(*revertMpu)();
 }
 
+static void waitFrame(void) {
+	while (REG_VCOUNT != 191) mySwiDelay(100);
+	while (REG_VCOUNT == 191) mySwiDelay(100);
+}
+
+// Centre str across lines of up to 30 characters, breaking at spaces
+static int printWrappedCenter(int y, const char *str, FontPalette palette) {
+	unsigned char line[31];
+	while (*str && y < 0x18) {
+		while (*str == ' ') str++;
+		int len = 0, lastSpace = -1;
+		while (str[len] && len < 30) {
+			if (str[len] == ' ') lastSpace = len;
+			len++;
+		}
+		if (str[len] && lastSpace > 0) len = lastSpace;
+		for (int i = 0; i < len; i++) line[i] = str[i];
+		line[len] = 0;
+		printCenter(16, y++, line, palette, false);
+		str += len;
+	}
+	return y;
+}
+
+// RetroAchievements unlock popup: about 3 seconds, or until A is pressed
+static void showRaPopup(void) {
+	const struct RaPopup *popup = (const struct RaPopup *)(INGAME_MENU_LOCATION + RA_POPUP_OFFSET);
+
+	clearScreen(false);
+	printCenter(16, 6, (const unsigned char *)"* Achievement Unlocked *", FONT_LIME, false);
+	if (popup->magic == RA_POPUP_MAGIC) {
+		int y = printWrappedCenter(10, popup->title, FONT_WHITE);
+		unsigned char pts[16];
+		int n = 0;
+		u32 p = popup->points;
+		char digits[10];
+		int d = 0;
+		do { digits[d++] = '0' + (p % 10); p /= 10; } while (p && d < 10);
+		while (d) pts[n++] = digits[--d];
+		const char *suffix = popup->points == 1 ? " point" : " points";
+		while (*suffix) pts[n++] = *suffix++;
+		pts[n] = 0;
+		printCenter(16, y + 1, pts, FONT_LIGHT_BLUE, false);
+	}
+	printCenter(16, 21, (const unsigned char *)"A: continue", FONT_DARKER_GRAY, false);
+
+	// A must be pressed fresh: it may be held for the game when this opens
+	bool aReleased = false;
+	for (int frame = 0; frame < 60*3; frame++) {
+		waitFrame();
+		if (KEYS == 0x59444552) { // 'REDY': ARM7 hasn't posted keys yet
+			continue;
+		}
+		if (!(KEYS & KEY_A)) {
+			aReleased = true;
+		} else if (aReleased) {
+			break;
+		}
+	}
+
+	sharedAddr[4] = 0x54495845; // EXIT
+	while (sharedAddr[4] != 0) swiDelay(100);
+}
+
 u32 inGameMenu(s32 *mainScreen, u32 consoleModel, s32 *exceptionRegisters) {
 	// If we were given exception registers, then we're handling an exception
 	bool exception = (exceptionRegisters != 0);
@@ -862,6 +927,8 @@ u32 inGameMenu(s32 *mainScreen, u32 consoleModel, s32 *exceptionRegisters) {
 	#endif
 
 	u32 res = 0;
+	// ARM7 sets this before starting us and only changes it after 'REDY'
+	const bool raPopupMode = !exception && sharedAddr[4] == RA_POPUP_MAGIC;
 
 	u32 dispcnt = REG_DISPCNT_SUB;
 	u16 bg0cnt = REG_BG0CNT_SUB;
@@ -917,6 +984,11 @@ u32 inGameMenu(s32 *mainScreen, u32 consoleModel, s32 *exceptionRegisters) {
 
 	// Let ARM7 know the menu loaded
 	sharedAddr[5] = 0x59444552; // 'REDY'
+
+	if (raPopupMode) {
+		showRaPopup();
+		goto restoreScreen;
+	}
 
 	MenuItem menuItems[8];
 	int menuItemCount = 0;
@@ -1048,6 +1120,7 @@ u32 inGameMenu(s32 *mainScreen, u32 consoleModel, s32 *exceptionRegisters) {
 		} */
 	}
 
+restoreScreen:
 	tonccpy(BG_MAP_RAM_SUB(15), bgMapBak, sizeof(bgMapBak));	// Restore BG_MAP_RAM
 	tonccpy(BG_PALETTE_SUB, palBak, sizeof(palBak));	// Restore the palette
 	tonccpy(BG_GFX_SUB, bgBak, sizeof(igmText.font) * 4);	// Restore the original graphics

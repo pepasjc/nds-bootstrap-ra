@@ -8,6 +8,7 @@
 #include <time.h>
 
 #include "igm_text.h"
+#include "ra_popup.h"
 #include "locations.h"
 #include "cardengine.h"
 #include "fpsAdjust.h"
@@ -54,9 +55,10 @@ void biosRead(void* dst, const void* src, u32 len)
 
 volatile int timeTillStatusRefresh = 7;
 
-void inGameMenu(void) {
+// popup: show a RetroAchievements unlock (see ra_popup.h) instead of the menu
+void inGameMenu(bool popup) {
 	// returnToMenu = false;
-	sharedAddr[4] = 0x554E454D; // 'MENU'
+	sharedAddr[4] = popup ? RA_POPUP_MAGIC : 0x554E454D; // 'RAPU' : 'MENU'
 	const u32 errorBak = sharedAddr[0];
 	IPC_SendSync(0x9);
 	REG_MASTER_VOLUME = 0;
@@ -76,7 +78,7 @@ void inGameMenu(void) {
 		}
 	}
 
-	if (sharedAddr[4] == 0x554E454D) {
+	if (sharedAddr[4] == 0x554E454D || sharedAddr[4] == RA_POPUP_MAGIC) {
 		bool exitMenu = false;
 		while (!exitMenu) {
 			sharedAddr[5] = ~REG_KEYINPUT & 0x3FF;
