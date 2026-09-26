@@ -29,15 +29,15 @@ def probes(blob: bytes) -> int:
         print("no probe records found")
         return 1
     print(f"{len(rows)} probe records")
-    print("   seq   vblank  keys  state    achs parsed errs unlocks  lines max  heap")
+    print("   seq   vblank  keys  state    achs parsed errs unlocks  lines max  evaluated skipped")
     for r in rows:
         if r[0] == RAT1:
             print(f"{r[1]:6d} {r[2]:8d}  {r[3]:04X}  (milestone 1 record)")
             continue
-        _, seq, frame, ks, ap, eu, lm, heap = r
+        _, seq, frame, ks, ap, eu, lm, fs = r
         state = STATES.get(ks >> 16, hex(ks >> 16))
         print(f"{seq:6d} {frame:8d}  {ks & 0xFFFF:04X}  {state:8s} {ap & 0xFFFF:4d} {ap >> 16:6d}"
-              f" {eu & 0xFFFF:4d} {eu >> 16:7d}  {lm & 0xFFFF:5d} {lm >> 16:3d} {heap:6d}")
+              f" {eu & 0xFFFF:4d} {eu >> 16:7d}  {lm & 0xFFFF:5d} {lm >> 16:3d} {fs & 0xFFFF:9d} {fs >> 16:7d}")
     return 0
 
 

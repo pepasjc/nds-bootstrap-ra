@@ -1733,6 +1733,8 @@ void runCardEngineCheck(void) {
   	// }
 }
 
+static void raIdle(void);
+
 void runCardEngineCheckHalt(void) {
 	//dbg_printf("runCardEngineCheckHalt\n");
 	#ifdef DEBUG		
@@ -1809,6 +1811,10 @@ void runCardEngineCheckHalt(void) {
         //}
   		// unlockMutex(&cardEgnineCommandMutex);
   	// }
+
+	// RetroAchievements: evaluate here, in the game's idle time, where
+	// interrupts and the game's own threads can preempt it
+	raIdle();
 }
 
 //---------------------------------------------------------------------------------
@@ -1861,8 +1867,12 @@ static u32 raPendingId[RA_PENDING_MAX];
 static u32 raPendingPoints[RA_PENDING_MAX];
 static u32 raPendingFrame[RA_PENDING_MAX];
 static int raPendingCount = 0;
+static vu32 raFramesDue = 0;
+static u32 raFramesSkipped = 0;
 
+// From raIdle(), so VBlank may interrupt: keep it out of the shared state
 static void raUnlocked(u32 achievementId, u32 points, const char* title) {
+	const int oldIME = enterCriticalSection();
 	if (raPendingCount < RA_PENDING_MAX) {
 		raPendingId[raPendingCount] = achievementId;
 		raPendingPoints[raPendingCount] = points;
@@ -1870,6 +1880,7 @@ static void raUnlocked(u32 achievementId, u32 points, const char* title) {
 		raPendingCount++;
 	}
 	raQueuePopup(title, points);
+	leaveCriticalSection(oldIME);
 }
 
 // Called with saveMutex held and the SD free
@@ -1923,17 +1934,30 @@ static void raWriteProbe(void) {
 	raRecord[4] = stats ? (stats->achievements | (stats->parsed << 16)) : 0;
 	raRecord[5] = stats ? (stats->parseErrors | (stats->unlocks << 16)) : 0;
 	raRecord[6] = stats ? (stats->lastLines | (stats->maxLines << 16)) : 0;
-	raRecord[7] = stats ? stats->heapUsed : 0;
+	raRecord[7] = stats ? (stats->frames | (raFramesSkipped << 16)) : 0;
 	fileWrite((char*)raRecord, &ramDumpFile, RA_DUMP_PROBE_OFFSET + (raSeq % RA_PROBE_RECORDS) * sizeof(raRecord), sizeof(raRecord));
 	raSeq++;
 }
 
 static int raComboFrames = 0;
 
+// Game idle time (SWI Halt hook): one evaluation per VBlank at most, and
+// none while ARM9 waits for a ROM read
+static void raIdle(void) {
+	if (raState != 1 || raFramesDue == 0 || sharedAddr[3] != 0) {
+		return;
+	}
+	const int oldIME = enterCriticalSection();
+	raFramesSkipped += raFramesDue - 1;
+	raFramesDue = 0;
+	leaveCriticalSection(oldIME);
+	raEngine->frame();
+}
+
 static void raVBlank(void) {
 	raFrame++;
 	if (raState == 1) {
-		raEngine->frame();
+		raFramesDue++;
 	}
 
 	// Achievements list: Select+Down held for half a second, without L so
@@ -1974,6 +1998,7 @@ static void raVBlank(void) {
 }
 #else
 static inline void raVBlank(void) {}
+static inline void raIdle(void) {}
 #endif
 
 void myIrqHandlerVBlank(void) {
