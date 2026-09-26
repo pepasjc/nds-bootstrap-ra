@@ -22,6 +22,7 @@ extern int raInitStub(const struct RaHost* host);
 extern void raFrameStub(void);
 
 struct RaStats raStats;
+static struct RaAchievement achievements[RA_MAX_ACHIEVEMENTS];
 
 struct RaEngineHeader raEngineHeader __attribute__((section(".raheader"), used)) = {
 	RA_ENGINE_MAGIC,
@@ -31,17 +32,11 @@ struct RaEngineHeader raEngineHeader __attribute__((section(".raheader"), used))
 	&raStats,
 	0,
 	{0},
+	{0},
+	achievements,
+	0,
 };
 
-struct Achievement {
-	u32 id;
-	u32 points;
-	const char* title;
-	const char* memaddr;
-	rc_trigger_t* trigger;
-};
-
-static struct Achievement achievements[RA_MAX_ACHIEVEMENTS];
 static u32 achievementCount;
 static const struct RaHost* host;
 
@@ -143,12 +138,12 @@ static int splitLine(char** cursor, char* end, char** fields, int maxFields) {
 	return n;
 }
 
-static void copyMd5(const char* src) {
+static void copyString(char* dst, const char* src, int max) {
 	int i = 0;
-	for (; i < 32 && src[i]; i++) {
-		raEngineHeader.md5[i] = src[i];
+	for (; i < max - 1 && src[i]; i++) {
+		dst[i] = src[i];
 	}
-	raEngineHeader.md5[i] = 0;
+	dst[i] = 0;
 }
 
 extern char __bss_start[], __bss_end[];
@@ -161,25 +156,25 @@ int raInit(const struct RaHost* h) {
 
 	char* cursor = host->set;
 	char* end = host->set + host->setSize;
-	char* fields[5];
+	char* fields[6];
 	while (cursor < end) {
-		int n = splitLine(&cursor, end, fields, 5);
+		int n = splitLine(&cursor, end, fields, 6);
 		if (n >= 4 && strcmp(fields[0], "game") == 0) {
 			raEngineHeader.gameId = parseUnsigned(fields[1]);
-			copyMd5(fields[2]);
-		} else if (n >= 5 && strcmp(fields[0], "ach") == 0) {
-			u32 id = parseUnsigned(fields[1]);
-			if (isDone(id) || achievementCount >= RA_MAX_ACHIEVEMENTS) {
-				continue;
-			}
-			struct Achievement* a = &achievements[achievementCount++];
-			a->id = id;
+			copyString(raEngineHeader.md5, fields[2], sizeof(raEngineHeader.md5));
+			copyString(raEngineHeader.title, fields[3], sizeof(raEngineHeader.title));
+		} else if (n >= 5 && strcmp(fields[0], "ach") == 0 && achievementCount < RA_MAX_ACHIEVEMENTS) {
+			struct RaAchievement* a = &achievements[achievementCount++];
+			a->id = parseUnsigned(fields[1]);
 			a->points = parseUnsigned(fields[2]);
 			a->memaddr = fields[3];
 			a->title = fields[4];
+			a->description = (n >= 6) ? fields[5] : "";
 			a->trigger = NULL;
+			a->status = isDone(a->id) ? RA_UNLOCKED_BEFORE : RA_LOCKED;
 		}
 	}
+	raEngineHeader.count = achievementCount;
 	raStats.achievements = achievementCount;
 	return achievementCount;
 }
@@ -188,13 +183,17 @@ static u32 parsedCount;
 
 static void parseSome(void) {
 	for (int i = 0; i < PARSE_PER_FRAME && parsedCount < achievementCount; i++) {
-		struct Achievement* a = &achievements[parsedCount++];
+		struct RaAchievement* a = &achievements[parsedCount++];
+		if (a->status != RA_LOCKED) {
+			continue;
+		}
 		int size = rc_trigger_size(a->memaddr);
 		void* buffer = size > 0 ? malloc(size) : NULL;
 		a->trigger = buffer ? rc_parse_trigger(buffer, a->memaddr, NULL, 0) : NULL;
 		if (a->trigger) {
 			raStats.parsed++;
 		} else {
+			a->status = RA_UNSUPPORTED;
 			raStats.parseErrors++;
 		}
 	}
@@ -209,11 +208,12 @@ void raFrame(void) {
 	}
 
 	for (u32 i = 0; i < parsedCount; i++) {
-		struct Achievement* a = &achievements[i];
-		if (!a->trigger) {
+		struct RaAchievement* a = &achievements[i];
+		if (a->status != RA_LOCKED || !a->trigger) {
 			continue;
 		}
-		if (rc_evaluate_trigger(a->trigger, peek, NULL, NULL) == RC_TRIGGER_STATE_TRIGGERED) {
+		if (rc_evaluate_trigger((rc_trigger_t*)a->trigger, peek, NULL, NULL) == RC_TRIGGER_STATE_TRIGGERED) {
+			a->status = RA_UNLOCKED_NOW;
 			raStats.unlocks++;
 			host->unlocked(a->id, a->points, a->title);
 		}

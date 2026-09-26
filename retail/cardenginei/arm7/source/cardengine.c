@@ -758,7 +758,7 @@ static void cardReadLED(const bool on, const bool dmaLed) {
 	}
 }*/
 
-extern void inGameMenu(bool popup);
+extern void inGameMenu(u32 mode);
 
 static inline void rebootConsole(void) {
 	if (valueBits & i2cBricked) {
@@ -1105,8 +1105,10 @@ void saveMainScreenSettingIgm(void) {
 }
 
 static struct RaPopup raPopup;
+static struct RaPopup raMenuInfo;
 static bool raPopupQueued = false;
-static bool raPopupLoading = false;
+static bool raMenuRequested = false;
+static const struct RaPopup* raLoadPayload = NULL; // copied in with the menu
 
 // Show a RetroAchievements unlock at the next VBlank that can take it.
 void raQueuePopup(const char* title, u32 points) {
@@ -1126,9 +1128,9 @@ void loadInGameMenu(void) {
 	sharedAddr[5] = 0x4C4D4749; // 'IGML'
 	fileWrite((char*)igmLocation, &pageFile, 0xA000, 0xA000);	// Backup part of game RAM to page file
 	fileRead((char*)igmLocation, &pageFile, 0, 0xA000);	// Read in-game menu
-	if (raPopupLoading) {
+	if (raLoadPayload) {
 		// Before ARM9 is let into the menu, so it never sees stale text
-		tonccpy((char*)igmLocation + RA_POPUP_OFFSET, &raPopup, sizeof(raPopup));
+		tonccpy((char*)igmLocation + RA_POPUP_OFFSET, raLoadPayload, sizeof(struct RaPopup));
 	}
 	sharedAddr[5] = 0;
 }
@@ -1926,10 +1928,24 @@ static void raWriteProbe(void) {
 	raSeq++;
 }
 
+static int raComboFrames = 0;
+
 static void raVBlank(void) {
 	raFrame++;
 	if (raState == 1) {
 		raEngine->frame();
+	}
+
+	// Achievements list: Select+Down held for half a second, without L so
+	// the in-game menu's L+Down+Select still gets through
+	const u16 keys = REG_KEYINPUT;
+	if (!(keys & (KEY_SELECT | KEY_DOWN)) && (keys & KEY_L)) {
+		if (++raComboFrames == 30) {
+			raMenuInfo.points = (raState == 1); // loaded?
+			raMenuRequested = true;
+		}
+	} else {
+		raComboFrames = 0;
 	}
 
 	const bool probeDue = (raFrame % 60 == 0);
@@ -2065,7 +2081,7 @@ void myIrqHandlerVBlank(void) {
 		igmText = (struct IgmText *)INGAME_MENU_LOCATION;
 		i2cWriteRegister(0x4A, 0x12, 0x00);
 #endif
-		inGameMenu(false);
+		inGameMenu(0x554E454D); // 'MENU'
 #ifdef TWLSDK
 		i2cWriteRegister(0x4A, 0x12, 0x01);
 #endif
@@ -2078,9 +2094,25 @@ void myIrqHandlerVBlank(void) {
 		i2cWriteRegister(0x4A, 0x12, 0x00);
 #endif
 		raPopupQueued = false;
-		raPopupLoading = true;
-		inGameMenu(true);
-		raPopupLoading = false;
+		raLoadPayload = &raPopup;
+		inGameMenu(RA_POPUP_MAGIC);
+		raLoadPayload = NULL;
+#ifdef TWLSDK
+		i2cWriteRegister(0x4A, 0x12, 0x01);
+#endif
+		unlockMutex(&saveMutex);
+		}
+	} else if (raMenuRequested && (valueBits & igmAccessible) && !wifiIrq && !readOngoing) {
+		if (tryLockMutex(&saveMutex)) {
+#ifdef TWLSDK
+		igmText = (struct IgmText *)INGAME_MENU_LOCATION;
+		i2cWriteRegister(0x4A, 0x12, 0x00);
+#endif
+		raMenuRequested = false;
+		raMenuInfo.magic = RA_MENU_MAGIC;
+		raLoadPayload = &raMenuInfo;
+		inGameMenu(RA_MENU_MAGIC);
+		raLoadPayload = NULL;
 #ifdef TWLSDK
 		i2cWriteRegister(0x4A, 0x12, 0x01);
 #endif

@@ -9,6 +9,7 @@
 // menu image, so the game RAM there is backed up and restored with it.
 
 #define RA_POPUP_MAGIC 0x55504152 // 'RAPU'
+#define RA_MENU_MAGIC 0x4E4D4152 // 'RAMN': achievements list instead
 #define RA_POPUP_OFFSET 0x9C00 // from INGAME_MENU_LOCATION
 #define RA_POPUP_TITLE_LEN 120
 

@@ -75,6 +75,24 @@ struct RaStats {
 	u32 heapUsed;
 };
 
+enum RaStatus {
+	RA_LOCKED = 0,
+	RA_UNLOCKED_BEFORE = 1, // in unlocks.log: not evaluated
+	RA_UNLOCKED_NOW = 2,
+	RA_UNSUPPORTED = 3,     // condition failed to parse
+};
+
+// The engine's table, also read by the achievements menu on ARM9.
+struct RaAchievement {
+	u32 id;
+	u32 points;
+	const char* title;
+	const char* description;
+	const char* memaddr;
+	void* trigger;          // rc_trigger_t*, once parsed
+	u32 status;             // enum RaStatus
+};
+
 // Card engine services the engine calls back into.
 struct RaHost {
 	void (*unlocked)(u32 achievementId, u32 points, const char* title);
@@ -92,6 +110,9 @@ struct RaEngineHeader {
 	struct RaStats* stats;
 	u32 gameId;
 	char md5[33];
+	char title[63];
+	struct RaAchievement* achievements;
+	u32 count;
 };
 
 #endif // RA_LINKER_SCRIPT

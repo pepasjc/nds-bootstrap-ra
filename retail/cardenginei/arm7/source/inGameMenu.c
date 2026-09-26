@@ -55,10 +55,11 @@ void biosRead(void* dst, const void* src, u32 len)
 
 volatile int timeTillStatusRefresh = 7;
 
-// popup: show a RetroAchievements unlock (see ra_popup.h) instead of the menu
-void inGameMenu(bool popup) {
+// mode: 'MENU', or RA_POPUP_MAGIC / RA_MENU_MAGIC for a RetroAchievements
+// unlock popup or achievements list (see ra_popup.h)
+void inGameMenu(u32 mode) {
 	// returnToMenu = false;
-	sharedAddr[4] = popup ? RA_POPUP_MAGIC : 0x554E454D; // 'RAPU' : 'MENU'
+	sharedAddr[4] = mode;
 	const u32 errorBak = sharedAddr[0];
 	IPC_SendSync(0x9);
 	REG_MASTER_VOLUME = 0;
@@ -78,7 +79,7 @@ void inGameMenu(bool popup) {
 		}
 	}
 
-	if (sharedAddr[4] == 0x554E454D || sharedAddr[4] == RA_POPUP_MAGIC) {
+	if (sharedAddr[4] == 0x554E454D || sharedAddr[4] == RA_POPUP_MAGIC || sharedAddr[4] == RA_MENU_MAGIC) {
 		bool exitMenu = false;
 		while (!exitMenu) {
 			sharedAddr[5] = ~REG_KEYINPUT & 0x3FF;

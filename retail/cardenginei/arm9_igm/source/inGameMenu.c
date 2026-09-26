@@ -14,6 +14,7 @@
 #include "nds_header.h"
 #include "tonccpy.h"
 #include "ra_popup.h"
+#include "ra_engine.h"
 
 void DC_InvalidateRange(const void *base, u32 size);
 void DC_FlushRange(const void *base, u32 size);
@@ -874,6 +875,20 @@ static int printWrappedCenter(int y, const char *str, FontPalette palette) {
 	return y;
 }
 
+// Append v in decimal; returns the new end
+static unsigned char* appendDec(unsigned char *out, u32 v) {
+	char digits[10];
+	int d = 0;
+	do { digits[d++] = '0' + (v % 10); v /= 10; } while (v && d < 10);
+	while (d) *out++ = digits[--d];
+	return out;
+}
+
+static unsigned char* appendStr(unsigned char *out, const char *str) {
+	while (*str) *out++ = *str++;
+	return out;
+}
+
 // RetroAchievements unlock popup: about 3 seconds, or until A is pressed
 static void showRaPopup(void) {
 	const struct RaPopup *popup = (const struct RaPopup *)(INGAME_MENU_LOCATION + RA_POPUP_OFFSET);
@@ -882,16 +897,8 @@ static void showRaPopup(void) {
 	printCenter(16, 6, (const unsigned char *)"* Achievement Unlocked *", FONT_LIME, false);
 	if (popup->magic == RA_POPUP_MAGIC) {
 		int y = printWrappedCenter(10, popup->title, FONT_WHITE);
-		unsigned char pts[16];
-		int n = 0;
-		u32 p = popup->points;
-		char digits[10];
-		int d = 0;
-		do { digits[d++] = '0' + (p % 10); p /= 10; } while (p && d < 10);
-		while (d) pts[n++] = digits[--d];
-		const char *suffix = popup->points == 1 ? " point" : " points";
-		while (*suffix) pts[n++] = *suffix++;
-		pts[n] = 0;
+		unsigned char pts[24];
+		*appendStr(appendDec(pts, popup->points), popup->points == 1 ? " point" : " points") = 0;
 		printCenter(16, y + 1, pts, FONT_LIGHT_BLUE, false);
 	}
 	printCenter(16, 21, (const unsigned char *)"A: continue", FONT_DARKER_GRAY, false);
@@ -914,6 +921,139 @@ static void showRaPopup(void) {
 	while (sharedAddr[4] != 0) swiDelay(100);
 }
 
+extern void DC_InvalidateRange(const void *base, u32 size);
+
+static void printTrunc(int x, int y, const char *str, int max, FontPalette palette) {
+	u16 *dst = BG_MAP_RAM_SUB(15) + y * 0x20 + x;
+	for (int i = 0; i < max && str[i]; i++)
+		*dst++ = (u8)str[i] | palette << 12;
+}
+
+static u16 held = 0;
+static int holdFrames = 0;
+
+// Keys already down (the Select+Down that opened the list) aren't presses
+static void raResetKeys(void) {
+	do {
+		waitFrame();
+	} while (KEYS == 0x59444552); // 'REDY': ARM7 hasn't posted keys yet
+	held = KEYS & 0xFFF;
+	holdFrames = 0;
+}
+
+// Next newly pressed keys; Up/Down repeat while held
+static u16 raNextPress(void) {
+	while (1) {
+		waitFrame();
+		if (KEYS == 0x59444552) // 'REDY': ARM7 hasn't posted keys yet
+			continue;
+		const u16 now = KEYS & 0xFFF;
+		const u16 pressed = now & ~held;
+		if (now != held) {
+			holdFrames = 0;
+		} else if ((now & (KEY_UP | KEY_DOWN)) && ++holdFrames >= 20 && (holdFrames % 4) == 0) {
+			held = now;
+			return now & (KEY_UP | KEY_DOWN);
+		}
+		held = now;
+		if (pressed)
+			return pressed;
+	}
+}
+
+#define RA_LIST_TOP 3
+#define RA_LIST_ROWS 18
+
+static const FontPalette raStatusPalette[4] = {FONT_LIGHT_GRAY, FONT_WHITE, FONT_LIME, FONT_RED};
+static const char raStatusMark[4] = {'-', '*', '*', '?'};
+static const char *raStatusText[4] = {"Locked", "Unlocked", "Unlocked this session", "Not supported"};
+
+// RetroAchievements list for this game (Select+Down)
+static void showRaMenu(void) {
+	const struct RaPopup *info = (const struct RaPopup *)(INGAME_MENU_LOCATION + RA_POPUP_OFFSET);
+	const struct RaEngineHeader *engine = (const struct RaEngineHeader *)(RA_REGION + RA_ENGINE_OFFSET);
+	// ARM7 wrote the table and set: don't read them through stale cache lines
+	DC_InvalidateRange((const void *)RA_REGION, RA_HEAP_OFFSET);
+
+	const bool loaded = info->magic == RA_MENU_MAGIC && info->points && engine->magic == RA_ENGINE_MAGIC;
+	const struct RaAchievement *list = loaded ? engine->achievements : NULL;
+	const int count = loaded ? (int)engine->count : 0;
+
+	u32 unlocked = 0, points = 0, totalPoints = 0;
+	for (int i = 0; i < count; i++) {
+		totalPoints += list[i].points;
+		if (list[i].status == RA_UNLOCKED_BEFORE || list[i].status == RA_UNLOCKED_NOW) {
+			unlocked++;
+			points += list[i].points;
+		}
+	}
+
+	int cursor = 0, top = 0;
+	bool detail = false;
+	unsigned char line[40];
+	raResetKeys();
+	while (1) {
+		clearScreen(false);
+		if (!loaded) {
+			printCenter(16, 9, (const unsigned char *)"No achievements loaded", FONT_WHITE, false);
+			printCenter(16, 11, (const unsigned char *)"for this game", FONT_WHITE, false);
+			printCenter(16, 22, (const unsigned char *)"B: back", FONT_DARKER_GRAY, false);
+		} else if (!detail) {
+			printTrunc(0, 0, engine->title, 32, FONT_LIGHT_BLUE);
+			*appendStr(appendDec(appendStr(appendDec(line, unlocked), "/"), count), " unlocked") = 0;
+			print(0, 1, line, FONT_WHITE, false);
+			*appendStr(appendDec(appendStr(appendDec(line, points), "/"), totalPoints), " pts") = 0;
+			printRight(31, 1, line, FONT_WHITE, false);
+			for (int row = 0; row < RA_LIST_ROWS && top + row < count; row++) {
+				const struct RaAchievement *a = &list[top + row];
+				const u32 status = a->status < 4 ? a->status : RA_LOCKED;
+				const int y = RA_LIST_TOP + row;
+				if (top + row == cursor)
+					printChar(0, y, '>', FONT_LIGHT_BLUE, false);
+				printChar(1, y, raStatusMark[status], raStatusPalette[status], false);
+				printTrunc(3, y, a->title, 29, raStatusPalette[status]);
+			}
+			printCenter(16, 22, (const unsigned char *)"A: details  B: back  L/R: page", FONT_DARKER_GRAY, false);
+		} else {
+			const struct RaAchievement *a = &list[cursor];
+			const u32 status = a->status < 4 ? a->status : RA_LOCKED;
+			printCenter(16, 2, (const unsigned char *)raStatusText[status], raStatusPalette[status], false);
+			int y = printWrappedCenter(5, a->title, FONT_WHITE);
+			y = printWrappedCenter(y + 1, a->description, FONT_LIGHT_GRAY);
+			*appendStr(appendDec(line, a->points), a->points == 1 ? " point" : " points") = 0;
+			printCenter(16, y + 1, line, FONT_LIGHT_BLUE, false);
+			printCenter(16, 22, (const unsigned char *)"B: back  Up/Down: next", FONT_DARKER_GRAY, false);
+		}
+
+		const u16 keys = raNextPress();
+		if (keys & KEY_B) {
+			if (!detail)
+				break;
+			detail = false;
+		} else if (count == 0) {
+			continue;
+		} else if (keys & KEY_A) {
+			detail = true;
+		} else if (keys & (KEY_UP | KEY_DOWN | KEY_L | KEY_R)) {
+			if (keys & KEY_UP) cursor--;
+			if (keys & KEY_DOWN) cursor++;
+			if (keys & KEY_L) cursor -= RA_LIST_ROWS;
+			if (keys & KEY_R) cursor += RA_LIST_ROWS;
+			if (cursor < 0) cursor = (keys & KEY_UP) ? count - 1 : 0;
+			if (cursor >= count) cursor = (keys & KEY_DOWN) ? 0 : count - 1;
+			if (cursor < top) top = cursor;
+			if (cursor >= top + RA_LIST_ROWS) top = cursor - RA_LIST_ROWS + 1;
+		}
+	}
+
+	// Don't hand the B press to the game
+	do {
+		waitFrame();
+	} while (KEYS & KEY_B);
+	sharedAddr[4] = 0x54495845; // EXIT
+	while (sharedAddr[4] != 0) swiDelay(100);
+}
+
 u32 inGameMenu(s32 *mainScreen, u32 consoleModel, s32 *exceptionRegisters) {
 	// If we were given exception registers, then we're handling an exception
 	bool exception = (exceptionRegisters != 0);
@@ -929,6 +1069,7 @@ u32 inGameMenu(s32 *mainScreen, u32 consoleModel, s32 *exceptionRegisters) {
 	u32 res = 0;
 	// ARM7 sets this before starting us and only changes it after 'REDY'
 	const bool raPopupMode = !exception && sharedAddr[4] == RA_POPUP_MAGIC;
+	const bool raMenuMode = !exception && sharedAddr[4] == RA_MENU_MAGIC;
 
 	u32 dispcnt = REG_DISPCNT_SUB;
 	u16 bg0cnt = REG_BG0CNT_SUB;
@@ -987,6 +1128,10 @@ u32 inGameMenu(s32 *mainScreen, u32 consoleModel, s32 *exceptionRegisters) {
 
 	if (raPopupMode) {
 		showRaPopup();
+		goto restoreScreen;
+	}
+	if (raMenuMode) {
+		showRaMenu();
 		goto restoreScreen;
 	}
 
