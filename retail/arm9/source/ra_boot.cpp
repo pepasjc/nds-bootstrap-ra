@@ -25,7 +25,7 @@
 // ---------------------------------------------------------------------------
 // Console key: SHA-256 of the build secret (ra_secret.h, not in git) and
 // the eMMC CID, which the DSi keeps at 0x02FFD7BC for its programs.  RA Sync
-// (ra-direct) derives the same key.  It signs the unlock records and the
+// (ra-nds) derives the same key.  It signs the unlock records and the
 // sets; it stays in RAM and never goes to the SD card.
 // ---------------------------------------------------------------------------
 
