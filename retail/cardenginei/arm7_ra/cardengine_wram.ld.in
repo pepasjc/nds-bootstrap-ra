@@ -53,5 +53,9 @@ SECTIONS
 		__bss_end = ABSOLUTE(.);
 	} >wram
 
+	/* The rest of WRAM up to the stack: the engine's first heap arena */
+	__wram_heap_start = ALIGN(8);
+	__wram_heap_end = RA_WRAM_CODE + RA_WRAM_SIZE - RA_STACK_SIZE;
+
 	/DISCARD/ : { *(.comment) *(.ARM.attributes) *(.note*) }
 }

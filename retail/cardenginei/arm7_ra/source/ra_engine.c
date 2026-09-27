@@ -61,31 +61,58 @@ struct Block {
 	u32 pad;
 };
 
-static u8* const heapStart = (u8*)(RA_REGION + RA_HEAP_OFFSET);
-static u8* const heapEnd = (u8*)(RA_REGION + RA_REGION_SIZE - RA_STACK_SIZE);
-static u8* heapPtr;
-static struct Block* heapTop;
+// Two arenas: the ARM7's WRAM after .bss (fast-RAM variant only; empty in
+// the main-RAM link), then RA_REGION.  Parsed triggers and memrefs are read
+// every frame, so keeping them in WRAM keeps them off the main memory bus.
+struct Arena {
+	u8* start;
+	u8* end;
+	u8* ptr;
+	struct Block* top;
+};
+
+extern u8 __wram_heap_start[], __wram_heap_end[];
+static struct Arena arenas[2];
 
 static void heapInit(void) {
-	heapPtr = heapStart;
-	heapTop = NULL;
+	arenas[0].start = __wram_heap_start;
+	arenas[0].end = __wram_heap_end;
+	arenas[1].start = (u8*)(RA_REGION + RA_HEAP_OFFSET);
+	arenas[1].end = (u8*)(RA_REGION + RA_REGION_SIZE - RA_STACK_SIZE);
+	for (int i = 0; i < 2; i++) {
+		arenas[i].ptr = arenas[i].start;
+		arenas[i].top = NULL;
+	}
+}
+
+static struct Arena* arenaOf(const void* p) {
+	return ((const u8*)p >= arenas[0].start && (const u8*)p < arenas[0].end) ? &arenas[0] : &arenas[1];
+}
+
+static void noteUsage(void) {
+	const u32 used = (arenas[0].ptr - arenas[0].start) + (arenas[1].ptr - arenas[1].start);
+	if (used > raStats.heapUsed) {
+		raStats.heapUsed = used;
+	}
 }
 
 void* malloc(size_t size) {
 	size = (size + 7) & ~7;
-	if (heapPtr + sizeof(struct Block) + size > heapEnd) {
-		return NULL;
+	for (int i = 0; i < 2; i++) {
+		struct Arena* a = &arenas[i];
+		if (a->ptr + sizeof(struct Block) + size > a->end) {
+			continue;
+		}
+		struct Block* b = (struct Block*)a->ptr;
+		b->prev = a->top;
+		b->size = size;
+		b->freed = 0;
+		a->top = b;
+		a->ptr += sizeof(struct Block) + size;
+		noteUsage();
+		return b + 1;
 	}
-	struct Block* b = (struct Block*)heapPtr;
-	b->prev = heapTop;
-	b->size = size;
-	b->freed = 0;
-	heapTop = b;
-	heapPtr += sizeof(struct Block) + size;
-	if ((u32)(heapPtr - heapStart) > raStats.heapUsed) {
-		raStats.heapUsed = heapPtr - heapStart;
-	}
-	return b + 1;
+	return NULL;
 }
 
 void free(void* p) {
@@ -93,9 +120,10 @@ void free(void* p) {
 		return;
 	}
 	((struct Block*)p - 1)->freed = 1;
-	while (heapTop && heapTop->freed) {
-		heapPtr = (u8*)heapTop;
-		heapTop = heapTop->prev;
+	struct Arena* a = arenaOf(p);
+	while (a->top && a->top->freed) {
+		a->ptr = (u8*)a->top;
+		a->top = a->top->prev;
 	}
 }
 
@@ -112,11 +140,13 @@ void* realloc(void* old, size_t size) {
 		return malloc(size);
 	}
 	struct Block* b = (struct Block*)old - 1;
+	struct Arena* a = arenaOf(old);
 	size = (size + 7) & ~7;
-	if (b == heapTop && (u8*)old + size <= heapEnd) {
-		// Newest block: grow in place
+	if (b == a->top && (u8*)old + size <= a->end) {
+		// Newest block of its arena: grow in place
 		b->size = size;
-		heapPtr = (u8*)old + size;
+		a->ptr = (u8*)old + size;
+		noteUsage();
 		return old;
 	}
 	void* p = malloc(size);

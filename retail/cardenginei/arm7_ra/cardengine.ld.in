@@ -8,6 +8,9 @@ MEMORY {
 }
 
 __ra_stack_top = RA_REGION + RA_REGION_SIZE;
+/* No WRAM heap arena in the main-RAM variant */
+__wram_heap_start = 0;
+__wram_heap_end = 0;
 
 SECTIONS
 {
