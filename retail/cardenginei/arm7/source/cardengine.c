@@ -1976,18 +1976,20 @@ static void raVBlank(void) {
 	}
 
 	// Achievements list: Select+Down held for half a second, without L so
-	// the in-game menu's L+Down+Select still gets through
+	// the in-game menu's L+Down+Select still gets through.  Only for games
+	// with achievements: every game runs this build, and some use the combo.
 	const u16 keys = REG_KEYINPUT;
-	if (!(keys & (KEY_SELECT | KEY_DOWN)) && (keys & KEY_L)) {
+	if (raState == 1 && !(keys & (KEY_SELECT | KEY_DOWN)) && (keys & KEY_L)) {
 		if (++raComboFrames == 30) {
-			raMenuInfo.points = (raState == 1); // loaded?
+			raMenuInfo.points = 1; // loaded
 			raMenuRequested = true;
 		}
 	} else {
 		raComboFrames = 0;
 	}
 
-	const bool probeDue = (raFrame % 60 == 0);
+	// Diagnostics only while the engine runs, not for every game
+	const bool probeDue = (raState == 1 && raFrame % 60 == 0);
 	if (!driveInited || readOngoing || !(raState == 0 || raPendingCount > 0 || probeDue)) {
 		return;
 	}
