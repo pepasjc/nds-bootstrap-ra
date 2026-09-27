@@ -60,6 +60,11 @@ $(BUILD)/trigger_sc.c: $(RCHEEVOS)/src/rcheevos/trigger.c | $(BUILD)
 $(BUILD)/trigger_sc.o: $(BUILD)/trigger_sc.c
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
+# ra_engine.c defines malloc/calloc/realloc/free.  At -O2 GCC turns
+# calloc's malloc+memset into a call to calloc, i.e. itself: infinite
+# recursion that ran the stack down over the whole region on hardware.
+$(BUILD)/ra_engine.o: CFLAGS += -fno-builtin
+
 $(BUILD)/%.o: %.c | $(BUILD)
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
