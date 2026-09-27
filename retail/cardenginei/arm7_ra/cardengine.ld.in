@@ -40,5 +40,12 @@ SECTIONS
 		__bss_end = ABSOLUTE(.);
 	} >ram
 
+	.mainbss ALIGN(4) (NOLOAD) : {
+		__mainbss_start = ABSOLUTE(.);
+		*(.mainbss*)
+		. = ALIGN(4);
+		__mainbss_end = ABSOLUTE(.);
+	} >ram
+
 	/DISCARD/ : { *(.comment) *(.ARM.attributes) *(.note*) }
 }

@@ -28,13 +28,15 @@ def probes3(blob: bytes) -> int:
     rows = [struct.unpack_from("<16I", blob, i * 64) for i in range(len(blob) // 64)]
     rows = sorted((r for r in rows if r[0] == RAT3), key=lambda r: r[1])
     print(f"{len(rows)} probe records")
-    print("   seq   vblank keys state   achs parsed errs unl lines  max  eval skip  stats    magic    "
+    print("   seq   vblank keys state   achs parsed errs unl lines  max  eval skip  variant  magic    "
           + " ".join(f"{w:>8s}" for w in WATCH))
     for r in rows:
-        _, seq, frame, ks, ap, eu, lm, fs, stats, magic = r[:10]
+        _, seq, frame, ks, ap, eu, lm, fs, cfg, magic = r[:10]
+        prio = ("during", "always", "off", "?")[(cfg >> 1) & 3]
+        variant = f"{'wram' if cfg >> 31 else 'main'}/{prio}/{max(1, (cfg >> 8) & 0xFF)}"
         state = STATES.get(ks >> 16, hex(ks >> 16))
         print(f"{seq:6d} {frame:8d} {ks & 0xFFFF:04X} {state:7s} {ap & 0xFFFF:4d} {ap >> 16:6d} {eu & 0xFFFF:4d}"
-              f" {eu >> 16:3d} {lm & 0xFFFF:5d} {lm >> 16:4d} {fs & 0xFFFF:5d} {fs >> 16:4d}  {stats:08X} {magic:08X} "
+              f" {eu >> 16:3d} {lm & 0xFFFF:5d} {lm >> 16:4d} {fs & 0xFFFF:5d} {fs >> 16:4d}  {variant:14s} {magic:08X} "
               + " ".join(f"{v:08X}" for v in r[10:]))
     return 0 if rows else 1
 

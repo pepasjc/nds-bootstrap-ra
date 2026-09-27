@@ -32,7 +32,19 @@
 #define RA_HEAP_OFFSET        0x40000
 #define RA_STACK_SIZE         0x4000
 
+// Fast-RAM variant (config "wram"): the engine's code, constants, working
+// data and stack in the ARM7's DSi WRAM-A below the cheat engine, so its
+// instruction fetches stay off the main memory bus the game's ARM9 needs.
+// Free unless the game's WiFi binary was relocated there
+// (hasVramWifiBinary).  Header, .data, achievements table and stats stay
+// in RA_REGION, where the ARM9 achievements list reads them.
+#define RA_WRAM_CODE          0x037C0000
+#define RA_WRAM_SIZE          0x1C000 // up to CHEAT_ENGINE_LOCATION
+
 #define RA_DUMP_BOOT_OFFSET   0x01800000
+// Staging only, after the set: the fast-RAM variant's two parts
+#define RA_STAGE_WRAM_MAIN    0x40000
+#define RA_STAGE_WRAM_CODE    0x60000
 #define RA_DUMP_UNLOCK_OFFSET 0x01FE0000
 #define RA_DUMP_PROBE_OFFSET  0x01FF0000
 #define RA_UNLOCK_RECORDS     1024
@@ -43,6 +55,16 @@
 
 #define RA_MAX_DONE ((RA_ENGINE_OFFSET - 0x20) / 4)
 
+// RaBootHeader.config, from sd:/_nds/ra/config.txt
+#define RA_CFG_WRAM           (1 << 0)   // use the fast-RAM variant if it fits
+#define RA_CFG_PRIO_SHIFT     1          // ARM9 main-memory priority:
+#define RA_CFG_PRIO_MASK      (3 << 1)
+#define RA_PRIO_DURING        0          //   only while a frame is evaluated
+#define RA_PRIO_ALWAYS        1          //   from 5 s in, re-applied every second
+#define RA_PRIO_OFF           2          //   never touched
+#define RA_CFG_INTERVAL_SHIFT 8          // evaluate every Nth frame (0/1: all)
+#define RA_CFG_DEFAULT        RA_CFG_WRAM
+
 #ifndef RA_LINKER_SCRIPT
 
 struct RaBootHeader {
@@ -51,7 +73,9 @@ struct RaBootHeader {
 	u32 setSize;
 	u32 unlockSeq;  // sequence number for the next unlock record
 	u32 doneCount;  // achievements this game already unlocked: not loaded
-	u32 reserved[3];
+	u32 config;       // RA_CFG_*
+	u32 wramMainSize; // fast-RAM variant parts, staged at RA_STAGE_WRAM_*
+	u32 wramCodeSize; //   (0: not staged)
 	u32 done[RA_MAX_DONE];
 };
 

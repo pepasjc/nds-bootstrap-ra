@@ -104,6 +104,41 @@ static bool readFile(const char* path, std::vector<u8>& out, size_t max) {
 	return ok;
 }
 
+// sd:/_nds/ra/config.txt: "key=value" lines, for trying engine variants
+//   wram=1|0                    fast-RAM engine when the game leaves room (1)
+//   priority=during|always|off  ARM9 main-memory priority (during)
+//   interval=N                  evaluate every Nth frame (1)
+static u32 readConfig(void) {
+	u32 config = RA_CFG_DEFAULT;
+	FILE* f = fopen(RA_DIR "/config.txt", "rb");
+	if (!f) {
+		return config;
+	}
+	char line[128];
+	while (fgets(line, sizeof(line), f)) {
+		char* eq = strchr(line, '=');
+		if (!eq || line[0] == '#') {
+			continue;
+		}
+		*eq = 0;
+		char* value = eq + 1;
+		value[strcspn(value, "\r\n \t#")] = 0;
+		if (strcmp(line, "wram") == 0) {
+			config = (strcmp(value, "0") == 0) ? (config & ~RA_CFG_WRAM) : (config | RA_CFG_WRAM);
+		} else if (strcmp(line, "priority") == 0) {
+			const u32 prio = strcmp(value, "always") == 0 ? RA_PRIO_ALWAYS
+			               : strcmp(value, "off") == 0 ? RA_PRIO_OFF : RA_PRIO_DURING;
+			config = (config & ~RA_CFG_PRIO_MASK) | (prio << RA_CFG_PRIO_SHIFT);
+		} else if (strcmp(line, "interval") == 0) {
+			u32 n = strtoul(value, NULL, 10);
+			if (n > 255) n = 255;
+			config = (config & ~(0xFFu << RA_CFG_INTERVAL_SHIFT)) | (n << RA_CFG_INTERVAL_SHIFT);
+		}
+	}
+	fclose(f);
+	return config;
+}
+
 void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 	if (!dsiFeatures() || conf->b4dsMode || conf->bootstrapOnFlashcard || conf->gameOnFlashcard) {
 		return;
@@ -125,14 +160,29 @@ void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 	if (readFile(setPath.c_str(), set, RA_SET_MAX - 1)
 	 && readFile("nitro:/cardenginei_arm7_ra.bin", engine, RA_ENGINE_MAX)) {
 		// "game\t<id>\t<md5>\t<title>" is the second line
+		set.push_back(0); // for strstr; not written out
 		const char* game = strstr((const char*)set.data(), "\ngame\t");
 		const char* md5 = game ? strchr(game + 6, '\t') : NULL;
 		if (md5) {
 			collectDone(md5 + 1, boot);
 		}
+		set.pop_back();
 		boot->magic = RA_BOOT_MAGIC;
 		boot->engineSize = engine.size();
 		boot->setSize = set.size();
+		boot->config = readConfig();
+
+		// Fast-RAM variant: the card engine picks it if the game leaves room
+		std::vector<u8> wramMain, wramCode;
+		if (readFile("nitro:/cardenginei_arm7_ra_wram_main.bin", wramMain, RA_ENGINE_MAX)
+		 && readFile("nitro:/cardenginei_arm7_ra_wram_code.bin", wramCode, RA_WRAM_SIZE - RA_STACK_SIZE)) {
+			boot->wramMainSize = wramMain.size();
+			boot->wramCodeSize = wramCode.size();
+			fseek(dump, RA_DUMP_BOOT_OFFSET + RA_STAGE_WRAM_MAIN, SEEK_SET);
+			fwrite(wramMain.data(), 1, wramMain.size(), dump);
+			fseek(dump, RA_DUMP_BOOT_OFFSET + RA_STAGE_WRAM_CODE, SEEK_SET);
+			fwrite(wramCode.data(), 1, wramCode.size(), dump);
+		}
 
 		fseek(dump, RA_DUMP_BOOT_OFFSET + RA_ENGINE_OFFSET, SEEK_SET);
 		fwrite(engine.data(), 1, engine.size(), dump);

@@ -15,6 +15,8 @@ RCHEEVOS	:=	$(CURDIR)/../../../external/rcheevos
 BUILD		:=	build
 TARGET		:=	cardenginei_arm7_ra
 OUTPUT		:=	$(CURDIR)/../../nitrofiles/$(TARGET).bin
+# Fast-RAM variant (see cardengine_wram.ld.in): same objects, two binaries
+OUTPUT_WRAM	:=	$(CURDIR)/../../nitrofiles/$(TARGET)_wram
 
 RC_SOURCES	:=	alloc.c condition.c condset.c format.c lboard.c memref.c operand.c richpresence.c runtime.c value.c
 SOURCES		:=	$(wildcard source/*.c) $(wildcard source/*.s) \
@@ -41,13 +43,24 @@ vpath %.s source
 
 .PHONY: all clean
 
-all: $(OUTPUT)
+all: $(OUTPUT) $(OUTPUT_WRAM)_main.bin
 
 $(BUILD):
 	@mkdir -p $@
 
 $(BUILD)/cardengine.ld: cardengine.ld.in $(CURDIR)/../../common/include/ra_engine.h | $(BUILD)
 	$(CC) -E -P -x c -DRA_LINKER_SCRIPT $(INCLUDE) $< -o $@
+
+$(BUILD)/cardengine_wram.ld: cardengine_wram.ld.in $(CURDIR)/../../common/include/ra_engine.h | $(BUILD)
+	$(CC) -E -P -x c -DRA_LINKER_SCRIPT $(INCLUDE) $< -o $@
+
+$(BUILD)/$(TARGET)_wram.elf: $(OBJECTS) $(BUILD)/cardengine_wram.ld
+	$(CC) $(subst $(BUILD)/cardengine.ld,$(BUILD)/cardengine_wram.ld,$(subst $(TARGET).map,$(TARGET)_wram.map,$(LDFLAGS))) $(OBJECTS) -lm -o $@
+
+$(OUTPUT_WRAM)_main.bin: $(BUILD)/$(TARGET)_wram.elf
+	$(OBJCOPY) -O binary -j .raheader -j .data $< $@
+	$(OBJCOPY) -O binary -j .text -j .rodata -j .ARM.exidx $< $(OUTPUT_WRAM)_code.bin
+	@echo built ... $(notdir $@) $$(stat -c %s $@) + $(notdir $(OUTPUT_WRAM))_code.bin $$(stat -c %s $(OUTPUT_WRAM)_code.bin) bytes
 
 # rcheevos never lets a trigger stop at its first false condition.  ra_fast.c
 # allows it per achievement through ra_short_circuit, where that can't change
@@ -80,6 +93,6 @@ $(OUTPUT): $(BUILD)/$(TARGET).elf
 	@echo built ... $(notdir $@) $$(stat -c %s $@) bytes
 
 clean:
-	@rm -rf $(BUILD) $(OUTPUT)
+	@rm -rf $(BUILD) $(OUTPUT) $(OUTPUT_WRAM)_main.bin $(OUTPUT_WRAM)_code.bin
 
 -include $(OBJECTS:.o=.d)

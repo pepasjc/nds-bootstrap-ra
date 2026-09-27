@@ -25,8 +25,12 @@
 extern int raInitStub(const struct RaHost* host);
 extern void raFrameStub(void);
 
-struct RaStats raStats;
-static struct RaAchievement achievements[RA_MAX_ACHIEVEMENTS];
+// The ARM9 achievements list and the card engine read these, so they stay in
+// RA_REGION even when the rest of .bss is in the ARM7's WRAM (see the
+// linker scripts)
+#define MAIN_RAM __attribute__((section(".mainbss")))
+struct RaStats raStats MAIN_RAM;
+static struct RaAchievement achievements[RA_MAX_ACHIEVEMENTS] MAIN_RAM;
 static rc_runtime_t runtime;
 
 struct RaEngineHeader raEngineHeader __attribute__((section(".raheader"), used)) = {
@@ -190,11 +194,12 @@ static void copyString(char* dst, const char* src, int max) {
 	dst[i] = 0;
 }
 
-extern char __bss_start[], __bss_end[];
+extern char __bss_start[], __bss_end[], __mainbss_start[], __mainbss_end[];
 
 int raInit(const struct RaHost* h) {
 	// Only code and data are loaded; the rest of the region is stale RAM.
 	memset(__bss_start, 0, __bss_end - __bss_start);
+	memset(__mainbss_start, 0, __mainbss_end - __mainbss_start);
 	heapInit();
 	rc_runtime_init(&runtime);
 	host = h;

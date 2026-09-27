@@ -1862,6 +1862,8 @@ static u32 raRecord[16];
 // what the ARM7 sees; set for Tetris DS while bringing the engine up
 static const u32 raProbeWatch[6] = {0x076a2c, 0x07b3b0, 0x17dd38, 0x17dd1c, 0x17dd20, 0x17dd30};
 static int raState = 0; // 0 = not loaded yet, 1 = running, -1 = off for this game
+static u32 raConfig = 0; // RA_CFG_*, from the boot header
+static bool raInWram = false; // fast-RAM variant loaded
 static struct RaEngineHeader* const raEngine = (struct RaEngineHeader*)(RA_REGION + RA_ENGINE_OFFSET);
 static struct RaHost raHost;
 static struct RaUnlockRecord raUnlock;
@@ -1906,7 +1908,24 @@ static void raLoad(void) {
 	 || boot->setSize == 0 || boot->setSize > RA_SET_MAX) {
 		return;
 	}
-	fileRead((char*)raEngine, &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_ENGINE_OFFSET, boot->engineSize);
+	raConfig = boot->config;
+	// The fast-RAM variant needs WRAM-A below the cheat engine, where the
+	// game's WiFi binary goes when nds-bootstrap relocates it
+	// (and only in the main build: ALTERNATIVE runs where that WRAM isn't
+	// available, and 0x037C0000 may then mirror the game's shared WRAM)
+	#ifdef ALTERNATIVE
+	raInWram = false;
+	#else
+	raInWram = (raConfig & RA_CFG_WRAM) && !(valueBits & hasVramWifiBinary)
+	 && boot->wramMainSize && boot->wramMainSize <= RA_ENGINE_MAX
+	 && boot->wramCodeSize && boot->wramCodeSize <= RA_WRAM_SIZE - RA_STACK_SIZE;
+	#endif
+	if (raInWram) {
+		fileRead((char*)raEngine, &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_STAGE_WRAM_MAIN, boot->wramMainSize);
+		fileRead((char*)RA_WRAM_CODE, &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_STAGE_WRAM_CODE, boot->wramCodeSize);
+	} else {
+		fileRead((char*)raEngine, &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_ENGINE_OFFSET, boot->engineSize);
+	}
 	fileRead((char*)(RA_REGION + RA_SET_OFFSET), &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_SET_OFFSET, boot->setSize);
 	if (raEngine->magic != RA_ENGINE_MAGIC) {
 		return;
@@ -1950,7 +1969,7 @@ static void raWriteProbe(void) {
 	raRecord[5] = stats ? (stats->parseErrors | (stats->unlocks << 16)) : 0;
 	raRecord[6] = stats ? (stats->lastLines | (stats->maxLines << 16)) : 0;
 	raRecord[7] = stats ? (stats->frames | (raFramesSkipped << 16)) : 0;
-	raRecord[8] = (u32)stats;
+	raRecord[8] = raConfig | (raInWram ? 0x80000000 : 0);
 	raRecord[9] = raEngine->magic;
 	for (int i = 0; i < 6; i++) {
 		raRecord[10+i] = *(vu32*)(0x02000000 + raProbeWatch[i]);
@@ -1971,14 +1990,25 @@ static void raIdle(void) {
 	raFramesSkipped += raFramesDue - 1;
 	raFramesDue = 0;
 	leaveCriticalSection(oldIME);
+	// ARM9 main-memory priority just for the evaluation (after the SDK's
+	// start-up IPC handshake), so the game's own ARM7 code, sound included,
+	// keeps its usual priority the rest of the frame
+	const bool prio = ((raConfig & RA_CFG_PRIO_MASK) >> RA_CFG_PRIO_SHIFT) == RA_PRIO_DURING && raFrame > 60*5;
+	if (prio) {
+		IPC_SendSync(0xB);
+	}
 	raInFrame = true;
 	raEngine->frame();
 	raInFrame = false;
+	if (prio) {
+		IPC_SendSync(0xC);
+	}
 }
 
 static void raVBlank(void) {
 	raFrame++;
-	if (raState == 1) {
+	const u32 interval = raConfig >> RA_CFG_INTERVAL_SHIFT & 0xFF;
+	if (raState == 1 && (interval <= 1 || raFrame % interval == 0)) {
 		raFramesDue++;
 		// The game's ARM9 data cache is write-back; asking it to clean with
 		// IPC sync 0xB every frame from the start hung Tetris DS on black
@@ -1989,7 +2019,8 @@ static void raVBlank(void) {
 		#endif
 		// Once a second, clear of the SDK's start-up IPC handshake: ask the
 		// ARM9 to take main-memory priority (and keep it if the game resets it)
-		if (raFrame > 60*5 && raFrame % 60 == 30) {
+		if (((raConfig & RA_CFG_PRIO_MASK) >> RA_CFG_PRIO_SHIFT) == RA_PRIO_ALWAYS
+		 && raFrame > 60*5 && raFrame % 60 == 30) {
 			IPC_SendSync(0xB);
 		}
 	}

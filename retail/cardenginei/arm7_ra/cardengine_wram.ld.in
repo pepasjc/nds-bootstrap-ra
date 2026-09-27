@@ -1,0 +1,57 @@
+#include "ra_engine.h"
+
+/* Fast-RAM variant: code, constants, .bss and stack in the ARM7's DSi
+   WRAM-A; header, .data and .mainbss in RA_REGION (see ra_engine.h).
+   Built from the same objects as cardengine.ld.in, into two binaries:
+   <name>_main.bin (.raheader + .data) and <name>_code.bin (.text + .rodata). */
+
+OUTPUT_FORMAT("elf32-littlearm", "elf32-bigarm", "elf32-littlearm")
+OUTPUT_ARCH(arm)
+
+MEMORY {
+	ram	: ORIGIN = RA_REGION + RA_ENGINE_OFFSET, LENGTH = RA_ENGINE_MAX
+	wram	: ORIGIN = RA_WRAM_CODE, LENGTH = RA_WRAM_SIZE - RA_STACK_SIZE
+}
+
+__ra_stack_top = RA_WRAM_CODE + RA_WRAM_SIZE;
+
+SECTIONS
+{
+	/* struct RaEngineHeader must come first */
+	.raheader : { KEEP (*(.raheader)) . = ALIGN(4); } >ram = 0xff
+
+	.data ALIGN(4) : {
+		__data_start = ABSOLUTE(.);
+		*(.data) *(.data.*)
+		. = ALIGN(4);
+		__data_end = ABSOLUTE(.);
+	} >ram = 0xff
+
+	.mainbss ALIGN(4) (NOLOAD) : {
+		__mainbss_start = ABSOLUTE(.);
+		*(.mainbss*)
+		. = ALIGN(4);
+		__mainbss_end = ABSOLUTE(.);
+	} >ram
+
+	.text : {
+		*(.text*)
+		*(.glue_7)
+		*(.glue_7t)
+		. = ALIGN(4);
+	} >wram = 0xff
+
+	.rodata : { *(.rodata) *(.rodata.*) . = ALIGN(4); } >wram = 0xff
+
+	.ARM.exidx : { *(.ARM.exidx* .gnu.linkonce.armexidx.*) } >wram
+
+	/* Not in the binary: zeroed by raInit() */
+	.bss ALIGN(4) (NOLOAD) : {
+		__bss_start = ABSOLUTE(.);
+		*(.bss*) *(COMMON)
+		. = ALIGN(4);
+		__bss_end = ABSOLUTE(.);
+	} >wram
+
+	/DISCARD/ : { *(.comment) *(.ARM.attributes) *(.note*) }
+}

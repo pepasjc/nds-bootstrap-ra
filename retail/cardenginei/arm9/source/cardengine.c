@@ -1628,6 +1628,8 @@ static void raCleanDCache(void) {
 	asm volatile("mcr p15, 0, %0, c7, c10, 4" :: "r"(0)); // drain write buffer
 }
 
+static u16 raExmemcntPrio __attribute__((unused)) = 0;
+
 void myIrqHandlerIPC(void) {
 //---------------------------------------------------------------------------------
 	#ifdef DEBUG
@@ -1722,7 +1724,12 @@ void myIrqHandlerIPC(void) {
 			// RetroAchievements: the engine runs on the ARM7 out of main RAM;
 			// give the game's ARM9 priority on the main memory bus so it
 			// doesn't stall behind the engine (EXMEMCNT bit 15 = ARM7 priority)
+			raExmemcntPrio = *(vu16*)0x04000204 & 0x8000;
 			*(vu16*)0x04000204 &= ~0x8000;
+			break;
+		case 0xC:
+			// ...and back to what the game had once the engine is done
+			*(vu16*)0x04000204 |= raExmemcntPrio;
 			break;
 	}
 
