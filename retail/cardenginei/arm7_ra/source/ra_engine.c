@@ -14,10 +14,13 @@
 
 #include "rc_runtime.h"
 #include "ra_engine.h"
+#include "ra_fast.h"
 
 #define RA_MAX_ACHIEVEMENTS 512
 #define PARSE_PER_FRAME 8
 #define REG_VCOUNT (*(vu16*)0x04000006)
+#define GAME_RAM ((const vu8*)0x02000000)
+#define GAME_RAM_SIZE 0x400000
 
 extern int raInitStub(const struct RaHost* host);
 extern void raFrameStub(void);
@@ -125,10 +128,10 @@ void* realloc(void* old, size_t size) {
 static uint32_t peek(uint32_t address, uint32_t numBytes, void* ud) {
 	(void)ud;
 	// $000000-$3FFFFF is main RAM; the DSi-only and Data TCM ranges read 0.
-	if (address + numBytes > 0x400000) {
+	if (address >= GAME_RAM_SIZE || GAME_RAM_SIZE - address < numBytes) {
 		return 0;
 	}
-	const vu8* p = (const vu8*)(0x02000000 + address);
+	const vu8* p = GAME_RAM + address;
 	switch (numBytes) {
 		case 1:
 			return p[0];
@@ -224,6 +227,11 @@ int raInit(const struct RaHost* h) {
 
 static u32 parsedCount;
 
+// Achievements are activated a few per frame and evaluated by rcheevos;
+// once all are, ra_fast.c takes over (rcheevos again if out of memory).
+enum { FAST_OFF, FAST_ON, FAST_FAILED };
+static u32 fastState;
+
 static struct RaAchievement* findAchievement(u32 id) {
 	for (u32 i = 0; i < achievementCount; i++) {
 		if (achievements[i].id == id) {
@@ -253,8 +261,9 @@ static void onEvent(const rc_runtime_event_t* event) {
 	if (event->type != RC_RUNTIME_EVENT_ACHIEVEMENT_TRIGGERED) {
 		return;
 	}
+	// Not deactivated: a triggered achievement is never evaluated again, and
+	// ra_fast.c keeps pointers into it.
 	struct RaAchievement* a = findAchievement(event->id);
-	rc_runtime_deactivate_achievement(&runtime, event->id);
 	if (a && a->status == RA_LOCKED) {
 		a->status = RA_UNLOCKED_NOW;
 		raStats.unlocks++;
@@ -266,10 +275,19 @@ void raFrame(void) {
 	const u16 start = REG_VCOUNT;
 	raStats.frames++;
 
-	if (parsedCount < achievementCount) {
-		activateSome();
+	if (fastState == FAST_OFF) {
+		if (parsedCount < achievementCount) {
+			activateSome();
+		}
+		rc_runtime_do_frame(&runtime, onEvent, peek, NULL, NULL);
+		if (parsedCount == achievementCount) {
+			fastState = raFastPrepare(&runtime) ? FAST_ON : FAST_FAILED;
+		}
+	} else if (fastState == FAST_ON) {
+		raFastFrame(&runtime, onEvent, peek, NULL, (const u8*)GAME_RAM, GAME_RAM_SIZE);
+	} else {
+		rc_runtime_do_frame(&runtime, onEvent, peek, NULL, NULL);
 	}
-	rc_runtime_do_frame(&runtime, onEvent, peek, NULL, NULL);
 
 	const u16 now = REG_VCOUNT;
 	const u32 lines = (now >= start) ? (u32)(now - start) : (u32)(now + 263 - start);

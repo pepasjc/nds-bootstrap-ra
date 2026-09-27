@@ -49,13 +49,14 @@ $(BUILD):
 $(BUILD)/cardengine.ld: cardengine.ld.in $(CURDIR)/../../common/include/ra_engine.h | $(BUILD)
 	$(CC) -E -P -x c -DRA_LINKER_SCRIPT $(INCLUDE) $< -o $@
 
-# rcheevos never lets a trigger stop at its first false condition.  That is
-# safe to allow: hit counts, pauses and measured values are evaluated in
-# passes that never short-circuit, so it only skips conditions without side
-# effects, and it halves the work per frame (tools/ra_bench.sh).
+# rcheevos never lets a trigger stop at its first false condition.  ra_fast.c
+# allows it per achievement through ra_short_circuit, where that can't change
+# a hit count that matters (tools/ra_diff.sh checks it against stock).
 $(BUILD)/trigger_sc.c: $(RCHEEVOS)/src/rcheevos/trigger.c | $(BUILD)
-	sed 's/memset(&eval_state, 0, sizeof(eval_state));/& eval_state.can_short_curcuit = 1;/' $< > $@
-	grep -q 'eval_state.can_short_curcuit = 1;' $@
+	sed -e 's/^#include "rc_internal.h"/&\nunsigned char ra_short_circuit;/' \
+		-e 's/memset(&eval_state, 0, sizeof(eval_state));/& eval_state.can_short_curcuit = ra_short_circuit;/' $< > $@
+	grep -q '^unsigned char ra_short_circuit;' $@
+	grep -q 'eval_state.can_short_curcuit = ra_short_circuit;' $@
 
 $(BUILD)/trigger_sc.o: $(BUILD)/trigger_sc.c
 	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
