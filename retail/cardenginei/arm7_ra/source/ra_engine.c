@@ -15,6 +15,8 @@
 #include "rc_runtime.h"
 #include "ra_engine.h"
 #include "ra_fast.h"
+#define RA_SHA256_LOW_STACK // called on the card engine's stack
+#include "ra_sha256.h"
 
 #define RA_MAX_ACHIEVEMENTS 512
 #define PARSE_PER_FRAME 8
@@ -24,6 +26,7 @@
 
 extern int raInitStub(const struct RaHost* host);
 extern void raFrameStub(void);
+static void raSign(const void* data, u32 size, u8 mac[32]);
 
 // The ARM9 achievements list and the card engine read these, so they stay in
 // RA_REGION even when the rest of .bss is in the ARM7's WRAM (see the
@@ -44,7 +47,19 @@ struct RaEngineHeader raEngineHeader __attribute__((section(".raheader"), used))
 	{0},
 	achievements,
 	0,
+	raSign,
 };
+
+// Unlock records are signed with the console key the loader left in RAM
+// (RA_KEY_LOCATION); without it the MAC is zeros, which no check accepts.
+static void raSign(const void* data, u32 size, u8 mac[32]) {
+	const u32* key = (const u32*)RA_KEY_LOCATION;
+	if (key[0] != RA_KEY_MAGIC) {
+		memset(mac, 0, 32);
+		return;
+	}
+	raHmacSha256((const u8*)(key + 1), data, size, mac);
+}
 
 static u32 achievementCount;
 static const struct RaHost* host;

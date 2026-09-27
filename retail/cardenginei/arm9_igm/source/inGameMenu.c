@@ -544,7 +544,7 @@ static int buildOptions(OptionsItem *optionsItems, u32 consoleModel, bool ra) {
 		optionsItems[optionsItemCount++] = OPTIONS_REFRESH_RATE;
 	optionsItems[optionsItemCount++] = OPTIONS_CLOCK_SPEED;
 	optionsItems[optionsItemCount++] = OPTIONS_VRAM_MODE;
-	if (ra && raAvailable())
+	if (RA_HARDCORE_AVAILABLE && ra && raAvailable()) // hardcore not yet: ra_engine.h
 		optionsItems[optionsItemCount++] = OPTIONS_RA_MODE;
 	#endif
 	return optionsItemCount;

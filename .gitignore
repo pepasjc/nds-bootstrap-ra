@@ -138,3 +138,4 @@ retail/arm9/include/version.h
 !retail/nitrofiles/bootloader_images.lz77
 !retail/nitrofiles/dstwo.dldi
 !retail/nitrofiles/esrbOnlineNotice.lz77
+retail/common/include/ra_secret.h

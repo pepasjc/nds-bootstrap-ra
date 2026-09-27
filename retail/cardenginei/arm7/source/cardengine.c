@@ -1887,7 +1887,7 @@ void raSetHardcore(bool on) {
 static bool raInWram = false; // fast-RAM variant loaded
 static struct RaEngineHeader* const raEngine = (struct RaEngineHeader*)(RA_REGION + RA_ENGINE_OFFSET);
 static struct RaHost raHost;
-static struct RaUnlockRecord raUnlock;
+static struct RaSignedUnlock raSigned;
 static u32 raUnlockSeq = 0;
 static u32 raPendingId[RA_PENDING_MAX];
 static u32 raPendingPoints[RA_PENDING_MAX];
@@ -1964,18 +1964,22 @@ static void raLoad(void) {
 
 // Called with saveMutex held and the SD free
 static void raWriteUnlocks(void) {
+	struct RaUnlockRecord* const r = &raSigned.record;
 	for (int i = 0; i < raPendingCount; i++) {
-		toncset(&raUnlock, 0, sizeof(raUnlock));
-		raUnlock.magic = RA_UNLOCK_MAGIC;
-		raUnlock.seq = raUnlockSeq;
-		raUnlock.achievementId = raPendingId[i];
-		raUnlock.gameId = raEngine->gameId;
-		raUnlock.points = raPendingPoints[i];
-		raUnlock.frame = raPendingFrame[i];
-		rtcGetTimeAndDate(raUnlock.rtc);
-		raUnlock.rtc[7] = (raConfig & RA_CFG_HARDCORE) ? 1 : 0; // flags: bit 0 = hardcore
-		tonccpy(raUnlock.md5, raEngine->md5, sizeof(raUnlock.md5));
-		fileWrite((char*)&raUnlock, &ramDumpFile, RA_DUMP_UNLOCK_OFFSET + (raUnlockSeq % RA_UNLOCK_RECORDS) * sizeof(raUnlock), sizeof(raUnlock));
+		toncset(&raSigned, 0, sizeof(raSigned));
+		r->magic = RA_UNLOCK_MAGIC;
+		r->seq = raUnlockSeq;
+		r->achievementId = raPendingId[i];
+		r->gameId = raEngine->gameId;
+		r->points = raPendingPoints[i];
+		r->frame = raPendingFrame[i];
+		rtcGetTimeAndDate(r->rtc);
+		r->rtc[7] = (raConfig & RA_CFG_HARDCORE) ? 1 : 0; // flags: bit 0 = hardcore
+		tonccpy(r->md5, raEngine->md5, sizeof(r->md5));
+		// Signed with the console key: records added or edited on the SD
+		// card don't verify and are never sent
+		raEngine->sign(r, sizeof(*r), raSigned.mac);
+		fileWrite((char*)&raSigned, &ramDumpFile, RA_DUMP_UNLOCK_OFFSET + (raUnlockSeq % RA_UNLOCK_RECORDS) * sizeof(raSigned), sizeof(raSigned));
 		raUnlockSeq++;
 	}
 	raPendingCount = 0;

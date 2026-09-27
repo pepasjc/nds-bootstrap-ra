@@ -1,5 +1,5 @@
 // RetroAchievements: stage the engine and this game's set for the ARM7 card
-// engine, and move last session's unlocks to sd:/_nds/ra/unlocks.log.
+// engine, and move last session's signed unlocks to sd:/_nds/ra/unlocks.bin.
 // See ra_engine.h for the layout.
 
 #include <nds.h>
@@ -14,76 +14,190 @@
 #include "myDSiMode.h"
 #include "configuration.h"
 #include "ra_engine.h"
+#include "ra_sha256.h"
+#include "ra_secret.h"
 
 #define RA_DIR "sd:/_nds/ra"
-#define RA_LOG RA_DIR "/unlocks.log"
+#define RA_SETS RA_DIR "/sets/"
+#define RA_UNLOCKS RA_DIR "/unlocks.bin"
+#define RA_HISTORY RA_DIR "/unlocks_history.txt"
 
-// Append last session's unlock records to unlocks.log, then clear the ring.
-// Returns the number of lines in the log afterwards.
+// ---------------------------------------------------------------------------
+// Console key: SHA-256 of the build secret (ra_secret.h, not in git) and
+// the eMMC CID, which the DSi keeps at 0x02FFD7BC for its programs.  RA Sync
+// (ra-direct) derives the same key.  It signs the unlock records and the
+// sets; it stays in RAM and never goes to the SD card.
+// ---------------------------------------------------------------------------
+
+static const char raKeyLabel[] = "RetroAchievements DSi console key 1";
+static u8 raKey[32];
+static int raKeyState = 0; // 0: not tried, 1: ready, -1: no CID
+
+static bool deriveKey(void) {
+	if (raKeyState) {
+		return raKeyState > 0;
+	}
+	vu8* cid = (vu8*)0x02FFD7BC;
+	bool present = false;
+	for (int i = 0; i < 16; i++) present |= cid[i] != 0;
+	if (!present) {
+		// Not filled in yet: the loader ARM7 reads it (retail/arm7/source/main.c)
+		*(vu32*)0x0CFFFD0C = 0x454D4D43; // 'EMMC'
+		fifoSendValue32(FIFO_USER_08, 0);
+		for (int i = 0; i < 1000 && *(vu32*)0x0CFFFD0C != 0; i++) {
+			swiDelay(1000);
+		}
+		DC_InvalidateRange((void*)0x02FFD7BC, 32);
+		for (int i = 0; i < 16; i++) present |= cid[i] != 0;
+	}
+	if (!present) {
+		raKeyState = -1;
+		return false;
+	}
+	u8 id[16];
+	for (int i = 0; i < 16; i++) id[i] = cid[i];
+	RaSha256 s;
+	raSha256Init(&s);
+	raSha256Update(&s, raBuildSecret, sizeof(raBuildSecret));
+	raSha256Update(&s, id, sizeof(id));
+	raSha256Update(&s, raKeyLabel, sizeof(raKeyLabel) - 1);
+	raSha256Final(&s, raKey);
+	raKeyState = 1;
+	return true;
+}
+
+static bool verifyUnlock(const RaSignedUnlock& u) {
+	if (u.record.magic != RA_UNLOCK_MAGIC || !deriveKey()) {
+		return false;
+	}
+	u8 mac[32];
+	raHmacSha256(raKey, &u.record, sizeof(u.record), mac);
+	return memcmp(mac, u.mac, 32) == 0;
+}
+
+// <rom>.sig: the set's HMAC under the console key, in hex, written by RA
+// Prep.  A set edited on the SD card (or from another console, or fetched
+// before signing existed) doesn't match and isn't loaded.
+static bool setSignatureOk(const char* name, const std::vector<u8>& set) {
+	if (!deriveKey()) {
+		return false;
+	}
+	char stored[80] = {0};
+	FILE* f = fopen((std::string(RA_SETS) + name + ".sig").c_str(), "rb");
+	if (!f) {
+		return false;
+	}
+	fgets(stored, sizeof(stored), f);
+	fclose(f);
+	u8 mac[32];
+	raHmacSha256(raKey, set.data(), set.size(), mac);
+	char hex[65];
+	for (int i = 0; i < 32; i++) {
+		snprintf(hex + i * 2, 3, "%02x", mac[i]);
+	}
+	return strncmp(stored, hex, 64) == 0;
+}
+
+// Last session's unlock records, from the ring in ramDump.bin to
+// unlocks.bin (only those that verify), with a line each in
+// unlocks_history.txt for reading.  Then the ring is cleared.  Returns the
+// number of records in unlocks.bin: the next sequence number.
 static u32 flushUnlocks(FILE* dump) {
-	std::vector<RaUnlockRecord> records(RA_UNLOCK_RECORDS);
+	struct stat st;
+	if (!deriveKey()) {
+		// Can't check them: leave the ring alone
+		return stat(RA_UNLOCKS, &st) == 0 ? st.st_size / sizeof(RaSignedUnlock) : 0;
+	}
+	std::vector<RaSignedUnlock> ring(RA_UNLOCK_RECORDS);
 	fseek(dump, RA_DUMP_UNLOCK_OFFSET, SEEK_SET);
-	const size_t got = fread(records.data(), sizeof(RaUnlockRecord), RA_UNLOCK_RECORDS, dump);
+	const size_t got = fread(ring.data(), sizeof(RaSignedUnlock), RA_UNLOCK_RECORDS, dump);
 
-	std::vector<RaUnlockRecord> valid;
+	std::vector<RaSignedUnlock> valid;
+	u32 rejected = 0;
 	for (size_t i = 0; i < got; i++) {
-		if (records[i].magic == RA_UNLOCK_MAGIC) {
-			valid.push_back(records[i]);
+		if (ring[i].record.magic != RA_UNLOCK_MAGIC) {
+			continue;
+		}
+		if (verifyUnlock(ring[i])) {
+			valid.push_back(ring[i]);
+		} else {
+			rejected++;
 		}
 	}
 	std::sort(valid.begin(), valid.end(),
-		[](const RaUnlockRecord& a, const RaUnlockRecord& b) { return a.seq < b.seq; });
+		[](const RaSignedUnlock& a, const RaSignedUnlock& b) { return a.record.seq < b.record.seq; });
 
-	if (!valid.empty()) {
+	if (!valid.empty() || rejected) {
 		mkdir(RA_DIR, 0777);
-		FILE* log = fopen(RA_LOG, "ab");
-		if (!log) {
+		FILE* bin = fopen(RA_UNLOCKS, "ab");
+		if (!bin) {
 			return 0; // keep the ring for next time
 		}
-		for (const RaUnlockRecord& r : valid) {
-			char md5[33];
-			memcpy(md5, r.md5, 32);
-			md5[32] = 0;
-			// achievement, game, md5, points, local time, frame
-			fprintf(log, "%lu\t%lu\t%s\t%lu\t20%02lu-%02lu-%02lu %02lu:%02lu:%02lu\t%lu\n",
-				r.achievementId, r.gameId, md5, r.points,
-				(u32)r.rtc[0], (u32)r.rtc[1], (u32)r.rtc[2],
-				(u32)r.rtc[4], (u32)r.rtc[5], (u32)r.rtc[6], r.frame);
+		fwrite(valid.data(), sizeof(RaSignedUnlock), valid.size(), bin);
+		fclose(bin);
+		FILE* log = fopen(RA_HISTORY, "ab");
+		if (log) {
+			for (const RaSignedUnlock& u : valid) {
+				const RaUnlockRecord& r = u.record;
+				fprintf(log, "20%02u-%02u-%02u %02u:%02u:%02u\t%lu\t%lu\t%.32s\t%lu\t%s\n",
+					r.rtc[0], r.rtc[1], r.rtc[2], r.rtc[4], r.rtc[5], r.rtc[6],
+					r.achievementId, r.gameId, r.md5, r.points, (r.rtc[7] & 1) ? "hardcore" : "softcore");
+			}
+			if (rejected) {
+				fprintf(log, "(%lu records failed their signature check and were dropped)\n", rejected);
+			}
+			fclose(log);
 		}
-		fclose(log);
-
-		std::vector<u8> zero(RA_UNLOCK_RECORDS * sizeof(RaUnlockRecord), 0);
+		std::vector<u8> zero(RA_UNLOCK_RECORDS * sizeof(RaSignedUnlock), 0);
 		fseek(dump, RA_DUMP_UNLOCK_OFFSET, SEEK_SET);
 		fwrite(zero.data(), 1, zero.size(), dump);
 	}
 
-	u32 lines = 0;
-	FILE* log = fopen(RA_LOG, "rb");
-	if (log) {
-		int c;
-		while ((c = fgetc(log)) != EOF) {
-			if (c == '\n') lines++;
-		}
-		fclose(log);
-	}
-	return lines;
+	return stat(RA_UNLOCKS, &st) == 0 ? st.st_size / sizeof(RaSignedUnlock) : 0;
 }
 
-// Achievement ids already unlocked for this ROM, from unlocks.log
-static void collectDone(const char* md5, RaBootHeader* boot) {
-	FILE* log = fopen(RA_LOG, "rb");
-	if (!log) {
-		return;
+static void addDone(RaBootHeader* boot, u32 id) {
+	for (u32 i = 0; i < boot->doneCount; i++) {
+		if (boot->done[i] == id) return;
 	}
-	char line[256];
-	while (fgets(line, sizeof(line), log) && boot->doneCount < RA_MAX_DONE) {
-		char* tab1 = strchr(line, '\t');
-		char* tab2 = tab1 ? strchr(tab1 + 1, '\t') : NULL;
-		if (tab2 && strncmp(tab2 + 1, md5, 32) == 0) {
-			boot->done[boot->doneCount++] = strtoul(line, NULL, 10);
+	if (boot->doneCount < RA_MAX_DONE) {
+		boot->done[boot->doneCount++] = id;
+	}
+}
+
+// Achievements already unlocked for this ROM in the mode being played: in
+// hardcore only hardcore unlocks count, in softcore both (a hardcore unlock
+// is a softcore one too).  From this console's unlocks.bin (verified) and
+// <rom>.unl, the account's unlocks as RetroAchievements listed them for RA
+// Prep/Sync ("S <ids>" and "H <ids>" lines; editing it can only hide or
+// repeat achievements, which RA then refuses as already unlocked).
+static void collectDone(const char* md5, const char* name, RaBootHeader* boot, bool hardcore) {
+	FILE* bin = fopen(RA_UNLOCKS, "rb");
+	if (bin) {
+		RaSignedUnlock u;
+		while (fread(&u, sizeof(u), 1, bin) == 1) {
+			if (strncmp(u.record.md5, md5, 32) == 0 && (!hardcore || (u.record.rtc[7] & 1)) && verifyUnlock(u)) {
+				addDone(boot, u.record.achievementId);
+			}
 		}
+		fclose(bin);
 	}
-	fclose(log);
+	FILE* unl = fopen((std::string(RA_SETS) + name + ".unl").c_str(), "rb");
+	if (unl) {
+		char line[4096];
+		while (fgets(line, sizeof(line), unl)) {
+			if ((line[0] == 'H' || (line[0] == 'S' && !hardcore)) && line[1] == ' ') {
+				for (char* p = line + 2; *p;) {
+					char* end;
+					const u32 id = strtoul(p, &end, 10);
+					if (end == p) break;
+					if (id) addDone(boot, id);
+					p = end;
+				}
+			}
+		}
+		fclose(unl);
+	}
 }
 
 static bool readFile(const char* path, std::vector<u8>& out, size_t max) {
@@ -148,6 +262,9 @@ static u32 readConfig(void) {
 		}
 		fclose(dump);
 	}
+	#if !RA_HARDCORE_AVAILABLE
+	config &= ~RA_CFG_HARDCORE; // not yet (ra_engine.h)
+	#endif
 	// Hardcore evaluates every frame
 	if (config & RA_CFG_HARDCORE) {
 		config &= ~(0xFFu << RA_CFG_INTERVAL_SHIFT);
@@ -168,39 +285,19 @@ bool raHardcoreGame(const configuration* conf) {
 	return stat((std::string(RA_DIR "/sets/") + name + ".txt").c_str(), &st) == 0;
 }
 
-// Diagnostics for signing unlocks with a console key: does this loader see
-// the eMMC CID at 0x02FFD7BC (as the DSi apps would), fetching it from the
-// ARM7 if not?  Writes only a hash of it to sd:/_nds/ra/debug_cid.txt.
-static void raDebugCid(void) {
-	vu8* cid = (vu8*)0x02FFD7BC;
-	bool present = false;
-	for (int i = 0; i < 16; i++) present |= cid[i] != 0;
-	bool fetched = false;
-	if (!present) {
-		*(vu32*)0x0CFFFD0C = 0x454D4D43; // 'EMMC': retail/arm7/source/main.c
-		fifoSendValue32(FIFO_USER_08, 0);
-		for (int i = 0; i < 1000 && *(vu32*)0x0CFFFD0C != 0; i++) {
-			swiDelay(1000);
-		}
-		DC_InvalidateRange((void*)0x02FFD7BC, 32);
-		for (int i = 0; i < 16; i++) fetched |= cid[i] != 0;
-	}
-	u32 hash = 2166136261u; // FNV-1a
-	for (int i = 0; i < 16; i++) {
-		hash = (hash ^ cid[i]) * 16777619u;
-	}
-	FILE* f = fopen(RA_DIR "/debug_cid.txt", "wb");
-	if (f) {
-		fprintf(f, "loader cid %08lx present=%d fetched=%d\n", (unsigned long)hash, present, fetched);
-		fclose(f);
-	}
-}
-
 void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 	if (!dsiFeatures() || conf->b4dsMode || conf->bootstrapOnFlashcard || conf->gameOnFlashcard) {
 		return;
 	}
-	raDebugCid();
+	// No console key (no eMMC CID): unlocks couldn't be signed, so no RA
+	const bool keyed = deriveKey();
+	if (keyed) {
+		// For the engine's signatures, in RAM only (ra_engine.h)
+		u32* key = (u32*)RA_KEY_LOCATION;
+		key[0] = RA_KEY_MAGIC;
+		memcpy(key + 1, raKey, sizeof(raKey));
+		DC_FlushRange(key, 64);
+	}
 	FILE* dump = fopen(ramDumpPath.c_str(), "r+b");
 	if (!dump) {
 		return;
@@ -209,26 +306,26 @@ void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 	RaBootHeader* boot = (RaBootHeader*)calloc(1, RA_ENGINE_OFFSET);
 	boot->unlockSeq = flushUnlocks(dump);
 
-	// sd:/_nds/ra/sets/<ROM file name>.txt, written by GameSync
+	// sd:/_nds/ra/sets/<ROM file name>.txt, written and signed by RA Prep
 	const char* name = strrchr(conf->ndsPath, '/');
 	name = name ? name + 1 : conf->ndsPath;
 	std::string setPath = std::string(RA_DIR "/sets/") + name + ".txt";
 
 	std::vector<u8> set, engine;
-	if (readFile(setPath.c_str(), set, RA_SET_MAX - 1)
+	if (keyed && readFile(setPath.c_str(), set, RA_SET_MAX - 1) && setSignatureOk(name, set)
 	 && readFile("nitro:/cardenginei_arm7_ra.bin", engine, RA_ENGINE_MAX)) {
+		boot->config = readConfig();
 		// "game\t<id>\t<md5>\t<title>" is the second line
 		set.push_back(0); // for strstr; not written out
 		const char* game = strstr((const char*)set.data(), "\ngame\t");
 		const char* md5 = game ? strchr(game + 6, '\t') : NULL;
 		if (md5) {
-			collectDone(md5 + 1, boot);
+			collectDone(md5 + 1, name, boot, boot->config & RA_CFG_HARDCORE);
 		}
 		set.pop_back();
 		boot->magic = RA_BOOT_MAGIC;
 		boot->engineSize = engine.size();
 		boot->setSize = set.size();
-		boot->config = readConfig();
 
 		// Fast-RAM variant: the card engine picks it if the game leaves room
 		std::vector<u8> wramMain, wramCode;
@@ -353,7 +450,10 @@ void raRedirectPrep(configuration* conf, const char* bootstrapPath) {
 	if (!romFingerprint(conf->ndsPath, fingerprint, sizeof(fingerprint))) {
 		return;
 	}
-	if ((stat((setPath + ".txt").c_str(), &st) == 0 || stat((setPath + ".none").c_str(), &st) == 0)
+	// A set counts only with a good signature (RA Prep signs what it fetches)
+	std::vector<u8> set;
+	const bool setOk = readFile((setPath + ".txt").c_str(), set, RA_SET_MAX - 1) && setSignatureOk(name, set);
+	if ((setOk || stat((setPath + ".none").c_str(), &st) == 0)
 	 && romMatchesId(fingerprint, (setPath + ".id").c_str())) {
 		return;
 	}
@@ -414,7 +514,8 @@ void raRedirectQuit(configuration* conf) {
 	if (!f) {
 		return;
 	}
-	fputs(conf->quitPath, f);
+	// The quit target, then the game (RA Sync refreshes its account unlocks)
+	fprintf(f, "%s\n%s\n", conf->quitPath, conf->ndsPath);
 	fclose(f);
 	conf->quitPath = strdup(RA_SYNC_PATH);
 }
