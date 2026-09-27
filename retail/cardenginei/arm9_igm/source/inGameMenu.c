@@ -489,8 +489,49 @@ static void drawMainMenu(MenuItem *menuItems, int menuItemCount) {
 	#endif
 }
 
-static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
-	OptionsItem optionsItems[8];
+// RetroAchievements hardcore for this game (sd:/_nds/ra/config.txt, and the
+// game has a set): no RAM viewer/editor, RAM dump or refresh-rate change.
+// The card engine refuses those requests too.
+static bool raHardcore(void) {
+	#ifdef B4DS
+	return false;
+	#else
+	const struct RaBootHeader *boot = (const struct RaBootHeader *)RA_REGION;
+	DC_InvalidateRange((const void *)RA_REGION, 32);
+	return boot->magic == RA_BOOT_MAGIC && (boot->config & RA_CFG_HARDCORE);
+	#endif
+}
+
+#ifndef B4DS
+// The game has a RetroAchievements set loaded
+static bool raAvailable(void) {
+	const struct RaBootHeader *boot = (const struct RaBootHeader *)RA_REGION;
+	DC_InvalidateRange((const void *)RA_REGION, 32);
+	return boot->magic == RA_BOOT_MAGIC;
+}
+
+static const unsigned char raModeLabel[] = "Achievements";
+static const unsigned char raSoftcoreText[] = "Softcore";
+static const unsigned char raHardcoreText[] = "Hardcore";
+static const unsigned char raModeDescription[] =
+	"Hardcore: no cheats, RAM viewer or refresh rate change. Turning it on restarts the game.";
+static const unsigned char raHardcoreQuestion[] =
+	"Hardcore turns off cheats, the RAM viewer and refresh rate changes. The game restarts now. Continue?";
+
+// Tell the card engine (RAHC) and wait for it
+static void raSendMode(u32 hardcore) {
+	sharedAddr[0] = hardcore;
+	sharedAddr[4] = 0x43484152; // RAHC
+	while (sharedAddr[4] == 0x43484152) {
+		while (REG_VCOUNT != 191) mySwiDelay(100);
+		while (REG_VCOUNT == 191) mySwiDelay(100);
+	}
+}
+#endif
+
+// The options as shown.  ra = false: without the RetroAchievements changes,
+// the order igmText's descriptions follow.
+static int buildOptions(OptionsItem *optionsItems, u32 consoleModel, bool ra) {
 	int optionsItemCount = 0;
 	optionsItems[optionsItemCount++] = OPTIONS_MAIN_SCREEN;
 	#ifndef B4DS
@@ -499,10 +540,38 @@ static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
 		optionsItems[optionsItemCount++] = OPTIONS_BRIGHTNESS;
 	#ifndef B4DS
 	optionsItems[optionsItemCount++] = OPTIONS_VOLUME;
-	optionsItems[optionsItemCount++] = OPTIONS_REFRESH_RATE;
+	if (!ra || !raHardcore())
+		optionsItems[optionsItemCount++] = OPTIONS_REFRESH_RATE;
 	optionsItems[optionsItemCount++] = OPTIONS_CLOCK_SPEED;
 	optionsItems[optionsItemCount++] = OPTIONS_VRAM_MODE;
+	if (ra && raAvailable())
+		optionsItems[optionsItemCount++] = OPTIONS_RA_MODE;
 	#endif
+	return optionsItemCount;
+}
+
+static const unsigned char *optionLabel(OptionsItem item) {
+	#ifndef B4DS
+	if (item == OPTIONS_RA_MODE) return raModeLabel;
+	#endif
+	return igmText.optionsLabels[item];
+}
+
+static const unsigned char *optionDescription(OptionsItem item, u32 consoleModel) {
+	#ifndef B4DS
+	if (item == OPTIONS_RA_MODE) return raModeDescription;
+	#endif
+	OptionsItem full[8];
+	const int count = buildOptions(full, consoleModel, false);
+	for (int i = 0; i < count; i++) {
+		if (full[i] == item) return igmText.optionsDescriptions[i];
+	}
+	return igmText.optionsDescriptions[0];
+}
+
+static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
+	OptionsItem optionsItems[8];
+	int optionsItemCount = buildOptions(optionsItems, consoleModel, true);
 
 	bool mainScreenChanged = false;
 
@@ -537,12 +606,15 @@ static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
 				case OPTIONS_VRAM_MODE:
 					optionValue = igmText.optionsValues[5 + (((REG_SCFG_EXT == 0 ? scfgExtBak : REG_SCFG_EXT) & BIT(13)) >> 13)];
 					break;
+				case OPTIONS_RA_MODE:
+					optionValue = raHardcore() ? raHardcoreText : raSoftcoreText;
+					break;
 				#endif
 			}
 
 			int digits = optionPercent == 100 ? 3 : (optionPercent >= 10 ? 2 : 1);
 			if(igmText.rtl) {
-				printRight(0x1D, i, igmText.optionsLabels[optionsItems[i]], FONT_WHITE, false);
+				printRight(0x1D, i, optionLabel(optionsItems[i]), FONT_WHITE, false);
 				if(isString) {
 					print(0, i, optionValue, FONT_WHITE, false);
 				} else {
@@ -550,7 +622,7 @@ static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
 					printChar(0 + digits, i, '%', FONT_WHITE, false);
 				}
 			} else {
-				print(2, i, igmText.optionsLabels[optionsItems[i]], FONT_WHITE, false);
+				print(2, i, optionLabel(optionsItems[i]), FONT_WHITE, false);
 				if(isString) {
 					printRight(0x1E, i, optionValue, FONT_WHITE, false);
 				} else {
@@ -560,7 +632,7 @@ static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
 			}
 		}
 		drawCursor(cursorPosition);
-		printMsg(17, igmText.optionsDescriptions[cursorPosition], FONT_WHITE, false);
+		printMsg(17, optionDescription(optionsItems[cursorPosition], consoleModel), FONT_WHITE, false);
 
 		waitKeys(KEY_UP | KEY_DOWN | KEY_LEFT | KEY_RIGHT | KEY_B | KEY_SELECT);
 
@@ -617,6 +689,25 @@ static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
 					}
 					break;
 				}
+				case OPTIONS_RA_MODE:
+					if (raHardcore()) {
+						// Leaving hardcore: at once; the refresh rate comes back
+						raSendMode(0);
+						optionsItemCount = buildOptions(optionsItems, consoleModel, true);
+						for (int i = 0; i < optionsItemCount; i++) {
+							if (optionsItems[i] == OPTIONS_RA_MODE) cursorPosition = i;
+						}
+					} else if (boolQuestion(raHardcoreQuestion)) {
+						// Entering hardcore: saved for the restart, which leaves
+						// cheats and anything changed so far behind
+						raSendMode(1);
+						extern bool exceptionPrinted;
+						exceptionPrinted = false;
+						sharedAddr[3] = 0x52534554; // TESR
+						sharedAddr[4] = 0x54455352; // RSET
+						return;
+					}
+					break;
 				case OPTIONS_REFRESH_RATE:
 					const int prevRefreshRate = refreshRate;
 					if (KEYS & KEY_LEFT) {
@@ -1143,10 +1234,13 @@ u32 inGameMenu(s32 *mainScreen, u32 consoleModel, s32 *exceptionRegisters) {
 	menuItems[menuItemCount++] = MENU_SCREENSHOT;
 	if(igmText.manualMaxLine > 0 && !exception)
 		menuItems[menuItemCount++] = MENU_MANUAL;
-	menuItems[menuItemCount++] = MENU_RAM_DUMP;
+	const bool hardcore = raHardcore();
+	if(!hardcore)
+		menuItems[menuItemCount++] = MENU_RAM_DUMP;
 	if(!exception)
 		menuItems[menuItemCount++] = MENU_OPTIONS;
-	menuItems[menuItemCount++] = MENU_RAM_VIEWER;
+	if(!hardcore)
+		menuItems[menuItemCount++] = MENU_RAM_VIEWER;
 	menuItems[menuItemCount++] = MENU_QUIT;
 
 	if(exception) {

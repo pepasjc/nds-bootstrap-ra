@@ -1109,8 +1109,6 @@ static struct RaPopup raMenuInfo;
 static bool raPopupQueued = false;
 static bool raMenuRequested = false;
 static const struct RaPopup* raLoadPayload = NULL; // copied in with the menu
-u32 raSoundSize = 0;   // unlock sound at RA_REGION + RA_SOUND_OFFSET (0: none)
-u32 raSoundFormat = 0; // RA_SOUND_*
 
 // Show a RetroAchievements unlock at the next VBlank that can take it.
 void raQueuePopup(const char* title, u32 points) {
@@ -1865,6 +1863,27 @@ static u32 raRecord[16];
 static const u32 raProbeWatch[6] = {0x076a2c, 0x07b3b0, 0x17dd38, 0x17dd1c, 0x17dd20, 0x17dd30};
 static int raState = 0; // 0 = not loaded yet, 1 = running, -1 = off for this game
 static u32 raConfig = 0; // RA_CFG_*, from the boot header
+
+// Hardcore for this game: inGameMenu.c refuses RAM reads/writes/dumps and
+// refresh-rate changes
+bool raHardcoreActive(void) {
+	return (raConfig & RA_CFG_HARDCORE) != 0;
+}
+
+// In-game menu (RAHC): softcore/hardcore for this game.  Kept in ramDump.bin
+// for the loader's next start.  Leaving hardcore takes effect at once;
+// entering it only through that restart (the menu restarts the game), so
+// that nothing done before carries over.  Called with saveMutex held.
+void raSetHardcore(bool on) {
+	static u32 mode[2];
+	mode[0] = RA_MODE_MAGIC;
+	mode[1] = on;
+	fileWrite((char*)mode, &ramDumpFile, RA_DUMP_MODE_OFFSET, sizeof(mode));
+	if (!on) {
+		raConfig &= ~RA_CFG_HARDCORE;
+		((struct RaBootHeader*)RA_REGION)->config = raConfig;
+	}
+}
 static bool raInWram = false; // fast-RAM variant loaded
 static struct RaEngineHeader* const raEngine = (struct RaEngineHeader*)(RA_REGION + RA_ENGINE_OFFSET);
 static struct RaHost raHost;
@@ -1929,13 +1948,6 @@ static void raLoad(void) {
 		fileRead((char*)raEngine, &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_ENGINE_OFFSET, boot->engineSize);
 	}
 	fileRead((char*)(RA_REGION + RA_SET_OFFSET), &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_SET_OFFSET, boot->setSize);
-	// Unlock sound for the popup (inGameMenu.c), from sd:/_nds/ra/unlock.wav
-	raSoundSize = 0;
-	if (boot->soundSize && boot->soundSize <= RA_SOUND_MAX && (boot->soundFormat & RA_SOUND_RATE_MASK)) {
-		fileRead((char*)(RA_REGION + RA_SOUND_OFFSET), &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_STAGE_SOUND, boot->soundSize);
-		raSoundSize = boot->soundSize;
-		raSoundFormat = boot->soundFormat;
-	}
 	if (raEngine->magic != RA_ENGINE_MAGIC) {
 		return;
 	}
@@ -1961,6 +1973,7 @@ static void raWriteUnlocks(void) {
 		raUnlock.points = raPendingPoints[i];
 		raUnlock.frame = raPendingFrame[i];
 		rtcGetTimeAndDate(raUnlock.rtc);
+		raUnlock.rtc[7] = (raConfig & RA_CFG_HARDCORE) ? 1 : 0; // flags: bit 0 = hardcore
 		tonccpy(raUnlock.md5, raEngine->md5, sizeof(raUnlock.md5));
 		fileWrite((char*)&raUnlock, &ramDumpFile, RA_DUMP_UNLOCK_OFFSET + (raUnlockSeq % RA_UNLOCK_RECORDS) * sizeof(raUnlock), sizeof(raUnlock));
 		raUnlockSeq++;

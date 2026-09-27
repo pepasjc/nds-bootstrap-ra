@@ -57,17 +57,10 @@ void biosRead(void* dst, const void* src, u32 len)
 volatile int timeTillStatusRefresh = 7;
 
 #ifndef TWLSDK
-// RetroAchievements unlock sound while the popup is up (the game is paused).
+// RetroAchievements unlock chime while the popup is up (the game is paused).
 // The game's channels are silenced one by one instead of through the master
-// volume, and a free channel plays either the sample from
-// sd:/_nds/ra/unlock.wav or, without one, a short rising tone arpeggio.
-// The sound hardware can't read the sample where it is kept (0x0CE...,
-// beyond its 27-bit addresses), so it plays from a stretch of game RAM that
-// is saved first and put back afterwards, as the in-game menu itself does.
-// (Sound registers other than SOUNDxCNT are write-only: a busy channel can't
-// be borrowed and restored, so no free channel means no sound.)
-#define RA_SOUND_BORROW 0x02360000
-extern u32 raSoundSize, raSoundFormat;
+// volume, and a free tone channel (8-13) plays a short rising arpeggio that
+// fades out.  All is put back afterwards.
 #define RA_CHIME_FRAMES 40
 #define RA_CHIME_VOLUME 90
 // Tone channel timer for a frequency: 33.513982 MHz / 2, 8 steps a period
@@ -87,28 +80,16 @@ static void raChimeStart(void) {
 	for (int i = 0; i < 16; i++) {
 		raChimeVolumes[i] = SOUND_VOL_BYTE(i);
 		SOUND_VOL_BYTE(i) = 0;
-		// A sample plays on any channel, the tones only on 8-13
-		if (raChimeChannel < 0 && (raSoundSize || (i >= 8 && i <= 13)) && !(SCHANNEL_CR(i) & SCHANNEL_ENABLE)) {
+		if (raChimeChannel < 0 && i >= 8 && i <= 13 && !(SCHANNEL_CR(i) & SCHANNEL_ENABLE)) {
 			raChimeChannel = i;
 		}
 	}
 	REG_MASTER_VOLUME = 127;
-	const int ch = raChimeChannel;
-	if (ch >= 0 && raSoundSize) {
-		tonccpy((void*)(RA_REGION + RA_SOUND_SAVE_OFFSET), (void*)RA_SOUND_BORROW, raSoundSize);
-		tonccpy((void*)RA_SOUND_BORROW, (void*)(RA_REGION + RA_SOUND_OFFSET), raSoundSize);
-		SCHANNEL_SOURCE(ch) = RA_SOUND_BORROW;
-		SCHANNEL_REPEAT_POINT(ch) = 0;
-		SCHANNEL_LENGTH(ch) = raSoundSize / 4;
-		SCHANNEL_TIMER(ch) = SOUND_FREQ(raSoundFormat & RA_SOUND_RATE_MASK);
-		SCHANNEL_CR(ch) = SCHANNEL_ENABLE | SOUND_ONE_SHOT | SOUND_PAN(64) | 127
-		 | ((raSoundFormat & RA_SOUND_PCM16) ? SOUND_FORMAT_16BIT : SOUND_FORMAT_8BIT);
-	}
 }
 
 static void raChimeTick(int frame) {
 	const int ch = raChimeChannel;
-	if (ch < 0 || raSoundSize || frame > RA_CHIME_FRAMES) {
+	if (ch < 0 || frame > RA_CHIME_FRAMES) {
 		return;
 	}
 	if (frame == RA_CHIME_FRAMES) {
@@ -130,9 +111,6 @@ static void raChimeTick(int frame) {
 static void raChimeStop(void) {
 	if (raChimeChannel >= 0) {
 		SCHANNEL_CR(raChimeChannel) = 0;
-		if (raSoundSize) {
-			tonccpy((void*)RA_SOUND_BORROW, (void*)(RA_REGION + RA_SOUND_SAVE_OFFSET), raSoundSize);
-		}
 	}
 	for (int i = 0; i < 16; i++) {
 		if (i != raChimeChannel) {
@@ -225,6 +203,19 @@ void inGameMenu(u32 mode) {
 			while (REG_VCOUNT != 191) swiDelay(100);
 			while (REG_VCOUNT == 191) swiDelay(100);
 
+			#ifndef TWLSDK
+			// RetroAchievements hardcore: no refresh-rate change, RAM dump,
+			// RAM viewer or editor (the menu hides them too)
+			extern bool raHardcoreActive(void);
+			if (raHardcoreActive()) {
+				const u32 cmd = sharedAddr[4];
+				if (cmd == 0x41535046 || cmd == 0x444D4152 || cmd == 0x524D4152 || cmd == 0x574D4152) {
+					sharedAddr[0] = 0xFFFFFFFF; // refused
+					sharedAddr[4] = 0x554E454D; // MENU
+				}
+			}
+			#endif
+
 			switch (sharedAddr[4]) {
 				/* case 0x54495845: // EXIT
 					exitMenu = true;
@@ -264,6 +255,14 @@ void inGameMenu(u32 mode) {
 					sharedAddr[0] = 0xFFFFFFFF;
 					#endif
 					break;
+				#ifndef TWLSDK
+				case 0x43484152: // RAHC: RetroAchievements softcore (0) / hardcore (1)
+				{
+					extern void raSetHardcore(bool on);
+					raSetHardcore(sharedAddr[0] != 0);
+					break;
+				}
+				#endif
 				case 0x444D4152: // RAMD
 					dumpRam();
 					exitMenu = true;

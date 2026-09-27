@@ -75,6 +75,7 @@ extern std::string ramDumpPath;
 extern void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath);
 extern void raRedirectQuit(configuration* conf);
 extern void raRedirectPrep(configuration* conf, const char* bootstrapPath);
+extern bool raHardcoreGame(const configuration* conf);
 extern std::string srParamsFilePath;
 extern std::string screenshotPath;
 extern std::string apFixOverlaysPath;
@@ -1946,6 +1947,11 @@ int loadFromSD(configuration* conf, const char *bootstrapPath) {
 		conf->wideCheatSize = getFileSize(wideCheatFilePath.c_str());
 		// conf->apPatchSize = getFileSize(conf->apPatchPath);
 		conf->cheatSize = getFileSize(cheatFilePath.c_str());
+		// RetroAchievements hardcore: no cheats (no file, so no cluster either)
+		if (raHardcoreGame(conf)) {
+			cheatFilePath.clear();
+			conf->cheatSize = 0;
+		}
 
 		//bool wideCheatFound = (access(wideCheatFilePath.c_str(), F_OK) == 0);
 
