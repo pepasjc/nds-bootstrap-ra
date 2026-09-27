@@ -18,11 +18,30 @@ RECORDS = 2048
 SIZE = 32
 RAT1 = 0x31544152
 RAT2 = 0x32544152
+RAT3 = 0x33544152
+WATCH = ("076a2c", "07b3b0", "17dd38", "17dd1c", "17dd20", "17dd30")
 RAU1 = 0x31554152
 STATES = {0: "loading", 1: "running", 0xFFFF: "off"}
 
 
+def probes3(blob: bytes) -> int:
+    rows = [struct.unpack_from("<16I", blob, i * 64) for i in range(len(blob) // 64)]
+    rows = sorted((r for r in rows if r[0] == RAT3), key=lambda r: r[1])
+    print(f"{len(rows)} probe records")
+    print("   seq   vblank keys state   achs parsed errs unl lines  max  eval skip  stats    magic    "
+          + " ".join(f"{w:>8s}" for w in WATCH))
+    for r in rows:
+        _, seq, frame, ks, ap, eu, lm, fs, stats, magic = r[:10]
+        state = STATES.get(ks >> 16, hex(ks >> 16))
+        print(f"{seq:6d} {frame:8d} {ks & 0xFFFF:04X} {state:7s} {ap & 0xFFFF:4d} {ap >> 16:6d} {eu & 0xFFFF:4d}"
+              f" {eu >> 16:3d} {lm & 0xFFFF:5d} {lm >> 16:4d} {fs & 0xFFFF:5d} {fs >> 16:4d}  {stats:08X} {magic:08X} "
+              + " ".join(f"{v:08X}" for v in r[10:]))
+    return 0 if rows else 1
+
+
 def probes(blob: bytes) -> int:
+    if any(struct.unpack_from("<I", blob, i * 64)[0] == RAT3 for i in range(len(blob) // 64)):
+        return probes3(blob)
     rows = [struct.unpack_from("<8I", blob, i * SIZE) for i in range(len(blob) // SIZE)]
     rows = sorted((r for r in rows if r[0] in (RAT1, RAT2)), key=lambda r: r[1])
     if not rows:

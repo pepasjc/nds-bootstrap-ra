@@ -1853,11 +1853,14 @@ void myIrqHandlerFIFO(void) {
 // ramDump.bin by the loader, evaluate every VBlank, record unlocks in a ring
 // there and pop them up.  Once a second a probe record with the engine's
 // stats goes to another ring, for diagnosis.
-#define RA_PROBE_RECORDS 2048 // 32 bytes each, 64KB
+#define RA_PROBE_RECORDS 1024 // 64 bytes each, 64KB
 #define RA_PENDING_MAX 8
 static u32 raFrame = 0;
 static u32 raSeq = 0;
-static u32 raRecord[8];
+static u32 raRecord[16];
+// Game RAM words logged with each probe record (RA addresses), for checking
+// what the ARM7 sees; set for Tetris DS while bringing the engine up
+static const u32 raProbeWatch[6] = {0x076a2c, 0x07b3b0, 0x17dd38, 0x17dd1c, 0x17dd20, 0x17dd30};
 static int raState = 0; // 0 = not loaded yet, 1 = running, -1 = off for this game
 static struct RaEngineHeader* const raEngine = (struct RaEngineHeader*)(RA_REGION + RA_ENGINE_OFFSET);
 static struct RaHost raHost;
@@ -1927,7 +1930,7 @@ static void raWriteUnlocks(void) {
 
 static void raWriteProbe(void) {
 	const struct RaStats* stats = (raState == 1) ? raEngine->stats : NULL;
-	raRecord[0] = 0x32544152; // 'RAT2'
+	raRecord[0] = 0x33544152; // 'RAT3'
 	raRecord[1] = raSeq;
 	raRecord[2] = raFrame;
 	raRecord[3] = REG_KEYINPUT | (raState << 16);
@@ -1935,6 +1938,11 @@ static void raWriteProbe(void) {
 	raRecord[5] = stats ? (stats->parseErrors | (stats->unlocks << 16)) : 0;
 	raRecord[6] = stats ? (stats->lastLines | (stats->maxLines << 16)) : 0;
 	raRecord[7] = stats ? (stats->frames | (raFramesSkipped << 16)) : 0;
+	raRecord[8] = (u32)stats;
+	raRecord[9] = raEngine->magic;
+	for (int i = 0; i < 6; i++) {
+		raRecord[10+i] = *(vu32*)(0x02000000 + raProbeWatch[i]);
+	}
 	fileWrite((char*)raRecord, &ramDumpFile, RA_DUMP_PROBE_OFFSET + (raSeq % RA_PROBE_RECORDS) * sizeof(raRecord), sizeof(raRecord));
 	raSeq++;
 }
@@ -1958,9 +1966,13 @@ static void raVBlank(void) {
 	raFrame++;
 	if (raState == 1) {
 		raFramesDue++;
-		// The game's ARM9 data cache is write-back: have it cleaned, or the
-		// engine reads stale RAM for the values the game touches most
+		// The game's ARM9 data cache is write-back; asking it to clean with
+		// IPC sync 0xB every frame from the start hung Tetris DS on black
+		// screens (the SDK's own IPC sync handshake?), so off while testing
+		// what the ARM7 sees without it.
+		#ifdef RA_ARM9_CACHE_CLEAN
 		IPC_SendSync(0xB);
+		#endif
 	}
 
 	// Achievements list: Select+Down held for half a second, without L so
