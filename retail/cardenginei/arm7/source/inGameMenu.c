@@ -55,6 +55,76 @@ void biosRead(void* dst, const void* src, u32 len)
 
 volatile int timeTillStatusRefresh = 7;
 
+#ifndef TWLSDK
+// RetroAchievements unlock chime and LED while the popup is up (the game is
+// paused).  The game's channels are silenced one by one instead of through
+// the master volume, a free tone channel (8-13) plays a short rising
+// arpeggio, and the DSi camera LED blinks.  All is put back afterwards.
+#define RA_CHIME_FRAMES 40
+#define RA_CHIME_VOLUME 90
+// Tone channel timer for a frequency: 33.513982 MHz / 2, 8 steps a period
+#define PSG_TIMER(hz) ((u16)(0x10000 - 16756991 / 8 / (hz)))
+#define SOUND_VOL_BYTE(n) (*(vu8*)(0x04000400 + ((n) << 4)))
+
+static const struct { u8 frame; u16 timer; } raChimeNotes[] = {
+	{ 0, PSG_TIMER(784) },	// G5
+	{ 4, PSG_TIMER(1175) },	// D6
+	{ 8, PSG_TIMER(1568) },	// G6, then fades out
+};
+static u8 raChimeVolumes[16];
+static int raChimeChannel;
+
+static void raChimeStart(void) {
+	raChimeChannel = -1;
+	for (int i = 0; i < 16; i++) {
+		raChimeVolumes[i] = SOUND_VOL_BYTE(i);
+		SOUND_VOL_BYTE(i) = 0;
+		if (raChimeChannel < 0 && i >= 8 && i <= 13 && !(SCHANNEL_CR(i) & SCHANNEL_ENABLE)) {
+			raChimeChannel = i;
+		}
+	}
+	REG_MASTER_VOLUME = 127;
+	i2cWriteRegister(0x4A, 0x31, 0x01); // Camera LED on
+}
+
+static void raChimeTick(int frame) {
+	if (frame % 6 == 0) {
+		i2cWriteRegister(0x4A, 0x31, ((frame / 6) & 1) ? 0x00 : 0x01); // Blink
+	}
+	const int ch = raChimeChannel;
+	if (ch < 0 || frame > RA_CHIME_FRAMES) {
+		return;
+	}
+	if (frame == RA_CHIME_FRAMES) {
+		SCHANNEL_CR(ch) = 0;
+		return;
+	}
+	for (unsigned n = 0; n < sizeof(raChimeNotes) / sizeof(raChimeNotes[0]); n++) {
+		if (raChimeNotes[n].frame == frame) {
+			SCHANNEL_TIMER(ch) = raChimeNotes[n].timer;
+			SCHANNEL_CR(ch) = SCHANNEL_ENABLE | SOUND_FORMAT_PSG | (2 << 24) | SOUND_PAN(64) | RA_CHIME_VOLUME; // 37.5% duty
+		}
+	}
+	const int last = raChimeNotes[sizeof(raChimeNotes) / sizeof(raChimeNotes[0]) - 1].frame;
+	if (frame > last) {
+		SOUND_VOL_BYTE(ch) = RA_CHIME_VOLUME * (RA_CHIME_FRAMES - frame) / (RA_CHIME_FRAMES - last);
+	}
+}
+
+static void raChimeStop(void) {
+	if (raChimeChannel >= 0) {
+		SCHANNEL_CR(raChimeChannel) = 0;
+	}
+	for (int i = 0; i < 16; i++) {
+		if (i != raChimeChannel) {
+			SOUND_VOL_BYTE(i) = raChimeVolumes[i];
+		}
+	}
+	REG_MASTER_VOLUME = 0; // inGameMenu() turns it back up on leaving
+	i2cWriteRegister(0x4A, 0x31, 0x00); // Camera LED off
+}
+#endif
+
 // mode: 'MENU', or RA_POPUP_MAGIC / RA_MENU_MAGIC for a RetroAchievements
 // unlock popup or achievements list (see ra_popup.h)
 void inGameMenu(u32 mode) {
@@ -81,7 +151,18 @@ void inGameMenu(u32 mode) {
 
 	if (sharedAddr[4] == 0x554E454D || sharedAddr[4] == RA_POPUP_MAGIC || sharedAddr[4] == RA_MENU_MAGIC) {
 		bool exitMenu = false;
+		#ifndef TWLSDK
+		int raFrame = 0;
+		if (mode == RA_POPUP_MAGIC) {
+			raChimeStart();
+		}
+		#endif
 		while (!exitMenu) {
+			#ifndef TWLSDK
+			if (mode == RA_POPUP_MAGIC) {
+				raChimeTick(raFrame++);
+			}
+			#endif
 			sharedAddr[5] = ~REG_KEYINPUT & 0x3FF;
 			sharedAddr[5] |= ((~REG_EXTKEYINPUT & 0x3) << 10) | ((~REG_EXTKEYINPUT & 0xC0) << 6);
 			if ((REG_EXTKEYINPUT & BIT(7)) && (valueBits & sleepMode) && (consoleModel < 2)) {
@@ -232,6 +313,11 @@ void inGameMenu(u32 mode) {
 				sharedAddr[4] = 0x554E454D; // MENU
 			}
 		}
+		#ifndef TWLSDK
+		if (mode == RA_POPUP_MAGIC) {
+			raChimeStop();
+		}
+		#endif
 	}
 
 	sharedAddr[0] = errorBak;
