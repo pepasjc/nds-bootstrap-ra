@@ -103,6 +103,9 @@ struct RaHost {
 	const struct RaBootHeader* boot;
 	char* set;        // writable: parsed in place
 	u32 setSize;
+	// Called every few achievements while a frame is evaluated: the ARM7
+	// serves the game's ROM reads, which must not wait for a whole frame.
+	void (*poll)(void);
 };
 
 // First bytes of the engine binary.

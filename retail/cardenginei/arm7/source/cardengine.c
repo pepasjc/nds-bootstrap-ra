@@ -1874,6 +1874,17 @@ static vu32 raFramesDue = 0;
 static u32 raFramesSkipped = 0;
 
 // From raIdle(), so VBlank may interrupt: keep it out of the shared state
+static bool raInFrame = false;
+
+// From inside a frame evaluation (engine stack): serve a ROM read the game
+// is waiting for now, not after the whole frame.  With the SWI Halt hook in
+// place ARM9 doesn't IPC us for reads; it waits for idle time, which is ours.
+static void raPoll(void) {
+	if (sharedAddr[3] >= (vu32)0x025FFB08 && sharedAddr[3] <= (vu32)0x025FFB0A) {
+		runCardEngineCheckHalt(); // raIdle() in there returns: raInFrame
+	}
+}
+
 static void raUnlocked(u32 achievementId, u32 points, const char* title) {
 	const int oldIME = enterCriticalSection();
 	if (raPendingCount < RA_PENDING_MAX) {
@@ -1905,6 +1916,7 @@ static void raLoad(void) {
 	raHost.boot = boot;
 	raHost.set = (char*)(RA_REGION + RA_SET_OFFSET);
 	raHost.setSize = boot->setSize;
+	raHost.poll = raPoll;
 	if (raEngine->init(&raHost) > 0) {
 		raState = 1;
 	}
@@ -1952,14 +1964,16 @@ static int raComboFrames = 0;
 // Game idle time (SWI Halt hook): one evaluation per VBlank at most, and
 // none while ARM9 waits for a ROM read
 static void raIdle(void) {
-	if (raState != 1 || raFramesDue == 0 || sharedAddr[3] != 0) {
+	if (raInFrame || raState != 1 || raFramesDue == 0 || sharedAddr[3] != 0) {
 		return;
 	}
 	const int oldIME = enterCriticalSection();
 	raFramesSkipped += raFramesDue - 1;
 	raFramesDue = 0;
 	leaveCriticalSection(oldIME);
+	raInFrame = true;
 	raEngine->frame();
+	raInFrame = false;
 }
 
 static void raVBlank(void) {

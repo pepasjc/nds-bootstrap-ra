@@ -28,4 +28,6 @@ struct RaFastInfo {
 };
 void raFastGetInfo(struct RaFastInfo* info);
 
+extern void (*raFastPoll)(void);
+
 #endif

@@ -198,6 +198,7 @@ int raInit(const struct RaHost* h) {
 	heapInit();
 	rc_runtime_init(&runtime);
 	host = h;
+	raFastPoll = h->poll;
 	achievementCount = 0;
 
 	char* cursor = host->set;
@@ -243,6 +244,9 @@ static struct RaAchievement* findAchievement(u32 id) {
 
 static void activateSome(void) {
 	for (int i = 0; i < PARSE_PER_FRAME && parsedCount < achievementCount; i++) {
+		if (host->poll) {
+			host->poll();
+		}
 		struct RaAchievement* a = &achievements[parsedCount++];
 		if (a->status != RA_LOCKED) {
 			continue;

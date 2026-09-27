@@ -144,6 +144,9 @@ static void updateModified(rc_modified_memref_t* m, rc_runtime_peek_t peek, void
 	rc_update_memref_value(&m->memref.value, rc_get_modified_memref_value(m, peek, ud));
 }
 
+// Set by ra_engine.c: lets the card engine serve ROM reads mid-frame
+void (*raFastPoll)(void);
+
 void raFastFrame(rc_runtime_t* runtime, rc_runtime_event_handler_t handler,
                  rc_runtime_peek_t peek, void* ud, const uint8_t* ram, uint32_t ramSize) {
 	uint32_t i, n;
@@ -161,6 +164,9 @@ void raFastFrame(rc_runtime_t* runtime, rc_runtime_event_handler_t handler,
 		Entry* e = &entries[i];
 		rc_trigger_t* t = e->trigger;
 		const uint16_t* p = e->prog;
+		if ((i & 7) == 0 && raFastPoll) {
+			raFastPoll();
+		}
 		if (!t) {
 			continue;
 		}
