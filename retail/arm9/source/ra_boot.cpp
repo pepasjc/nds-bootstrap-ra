@@ -202,6 +202,7 @@ void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 #define RA_PREP_PATH RA_DIR "/raprep.nds"
 #define RA_PREP_FILE RA_DIR "/prep.txt"
 #define RA_SKIP_FILE RA_DIR "/skip_once.txt"
+#define RA_AFTER_PREP_FILE RA_DIR "/after_prep.txt"
 
 // Unlaunch's auto-load request: once the console restarts, Unlaunch boots
 // `path` instead of its default.  (This loader runs at 0x02280000, so the
@@ -329,14 +330,29 @@ void raRedirectQuit(configuration* conf) {
 	 || !conf->quitPath || !conf->quitPath[0] || strcmp(conf->quitPath, RA_SYNC_PATH) == 0) {
 		return;
 	}
+	// Started by RA Prep's restart (after_prep.txt names this ROM): quitting
+	// straight to TWiLight Menu++ then hangs on the game's last frame, while
+	// RA Sync, which returns through Unlaunch, works, so quit through RA Sync
+	// even without a set.  One use.
+	bool afterPrep = false;
+	FILE* f = fopen(RA_AFTER_PREP_FILE, "rb");
+	if (f) {
+		char rom[256] = {0};
+		fgets(rom, sizeof(rom), f);
+		fclose(f);
+		remove(RA_AFTER_PREP_FILE);
+		rom[strcspn(rom, "\r\n")] = '\0';
+		afterPrep = strcmp(rom, conf->ndsPath) == 0;
+	}
+
 	const char* name = strrchr(conf->ndsPath, '/');
 	name = name ? name + 1 : conf->ndsPath;
 	const std::string setPath = std::string(RA_DIR "/sets/") + name + ".txt";
 	struct stat st;
-	if (stat(setPath.c_str(), &st) != 0 || stat(RA_SYNC_PATH, &st) != 0) {
+	if ((!afterPrep && stat(setPath.c_str(), &st) != 0) || stat(RA_SYNC_PATH, &st) != 0) {
 		return;
 	}
-	FILE* f = fopen(RA_RETURN_PATH, "wb");
+	f = fopen(RA_RETURN_PATH, "wb");
 	if (!f) {
 		return;
 	}
