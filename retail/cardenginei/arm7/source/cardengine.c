@@ -1987,6 +1987,11 @@ static void raVBlank(void) {
 		#ifdef RA_ARM9_CACHE_CLEAN
 		IPC_SendSync(0xB);
 		#endif
+		// Once a second, clear of the SDK's start-up IPC handshake: ask the
+		// ARM9 to take main-memory priority (and keep it if the game resets it)
+		if (raFrame > 60*5 && raFrame % 60 == 30) {
+			IPC_SendSync(0xB);
+		}
 	}
 
 	// Achievements list: Select+Down held for half a second, without L so

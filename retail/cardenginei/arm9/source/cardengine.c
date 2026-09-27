@@ -1719,8 +1719,10 @@ void myIrqHandlerIPC(void) {
 			inGameMenu((s32*)0);
 			break;
 		case 0xB:
-			// RetroAchievements: ARM7 reads game RAM next; write our cache back
-			raCleanDCache();
+			// RetroAchievements: the engine runs on the ARM7 out of main RAM;
+			// give the game's ARM9 priority on the main memory bus so it
+			// doesn't stall behind the engine (EXMEMCNT bit 15 = ARM7 priority)
+			*(vu16*)0x04000204 &= ~0x8000;
 			break;
 	}
 
