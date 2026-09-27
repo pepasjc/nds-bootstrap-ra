@@ -223,11 +223,28 @@ static void unlaunchAutoload(const char* path) {
 	DC_FlushAll();
 }
 
-// Whether the ROM is still the one its set was made for.  RA Prep writes
-// <rom>.id with the ROM's size and header CRC (hex) on the first line, then
-// its hash; both are free to check here, and a different dump (region,
-// revision) or a replaced file changes them.  Missing .id: not checked yet.
-static bool romMatchesId(const char* romPath, const char* idPath) {
+// The ROM file's fingerprint: size, header CRC and modification time (hex),
+// all free to read here.  Another dump (region, revision) changes the size
+// or header; a replaced or patched file changes the time.
+static bool romFingerprint(const char* romPath, char* out, size_t size) {
+	struct stat st;
+	u16 crc = 0;
+	FILE* f = fopen(romPath, "rb");
+	if (!f || stat(romPath, &st) != 0) {
+		if (f) fclose(f);
+		return false;
+	}
+	fseek(f, 0x15E, SEEK_SET);
+	fread(&crc, sizeof(crc), 1, f);
+	fclose(f);
+	snprintf(out, size, "%lx %04x %lx", (unsigned long)st.st_size, crc, (unsigned long)st.st_mtime);
+	return true;
+}
+
+// Whether the ROM is still the one its set was made for: RA Prep keeps the
+// fingerprint this loader gave it on the first line of <rom>.id (then the
+// ROM's hash).  Missing .id: not checked yet.
+static bool romMatchesId(const char* fingerprint, const char* idPath) {
 	char expected[64] = {0};
 	FILE* f = fopen(idPath, "rb");
 	if (!f) {
@@ -236,21 +253,7 @@ static bool romMatchesId(const char* romPath, const char* idPath) {
 	fgets(expected, sizeof(expected), f);
 	fclose(f);
 	expected[strcspn(expected, "\r\n")] = '\0';
-
-	struct stat st;
-	u16 crc = 0;
-	f = fopen(romPath, "rb");
-	if (!f || stat(romPath, &st) != 0) {
-		if (f) fclose(f);
-		return false;
-	}
-	fseek(f, 0x15E, SEEK_SET);
-	fread(&crc, sizeof(crc), 1, f);
-	fclose(f);
-
-	char actual[64];
-	snprintf(actual, sizeof(actual), "%lx %04x", (unsigned long)st.st_size, crc);
-	return strcmp(actual, expected) == 0;
+	return strcmp(fingerprint, expected) == 0;
 }
 
 // A game with no achievement set yet goes through RA Prep first: the loader
@@ -287,17 +290,23 @@ void raRedirectPrep(configuration* conf, const char* bootstrapPath) {
 	const char* name = strrchr(conf->ndsPath, '/');
 	name = name ? name + 1 : conf->ndsPath;
 	const std::string setPath = std::string(RA_DIR "/sets/") + name;
+	char fingerprint[64];
+	if (!romFingerprint(conf->ndsPath, fingerprint, sizeof(fingerprint))) {
+		return;
+	}
 	if ((stat((setPath + ".txt").c_str(), &st) == 0 || stat((setPath + ".none").c_str(), &st) == 0)
-	 && romMatchesId(conf->ndsPath, (setPath + ".id").c_str())) {
+	 && romMatchesId(fingerprint, (setPath + ".id").c_str())) {
 		return;
 	}
 
+	// ROM, loader to start again, fingerprint for <rom>.id
 	f = fopen(RA_PREP_FILE, "wb");
 	if (!f) {
 		return;
 	}
-	fprintf(f, "%s\n%s\n", conf->ndsPath,
-		strncmp(bootstrapPath, "sd:/", 4) == 0 ? bootstrapPath : "sd:/_nds/nds-bootstrap-nightly.nds");
+	fprintf(f, "%s\n%s\n%s\n", conf->ndsPath,
+		strncmp(bootstrapPath, "sd:/", 4) == 0 ? bootstrapPath : "sd:/_nds/nds-bootstrap-nightly.nds",
+		fingerprint);
 	fclose(f);
 
 	unlaunchAutoload(RA_PREP_PATH);
