@@ -73,6 +73,7 @@ extern std::string wideCheatFilePath;
 extern std::string cheatFilePath;
 extern std::string ramDumpPath;
 extern void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath);
+extern void raRedirectQuit(configuration* conf);
 extern std::string srParamsFilePath;
 extern std::string screenshotPath;
 extern std::string apFixOverlaysPath;
@@ -391,6 +392,9 @@ static void load_conf(configuration* conf, const char* fn) {
 
 	// NDS path used when quitting game
 	conf->quitPath = strdup(config_file.fetch("NDS-BOOTSTRAP", "QUIT_PATH").c_str());
+
+	// RetroAchievements: quit through RA Sync, which uploads the unlocks
+	raRedirectQuit(conf);
 
 	// GBA path
 	// conf->gbaPath = strdup(config_file.fetch("NDS-BOOTSTRAP", "GBA_PATH").c_str());

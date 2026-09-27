@@ -196,3 +196,32 @@ void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 	fclose(dump);
 	free(boot);
 }
+
+#define RA_SYNC_PATH "sd:/_nds/ra/rasync.nds"
+#define RA_RETURN_PATH RA_DIR "/return.txt"
+
+// Quitting a game with achievements goes through RA Sync (GameSync's
+// rasync.nds): it uploads the unlocks over the DSi's WiFi, fetches sets for
+// new ROMs, then boots the original quit target, saved in return.txt.
+// Quitting boots the quit path through Unlaunch in full DSi mode, which the
+// DSi WiFi (WPA2) needs.
+void raRedirectQuit(configuration* conf) {
+	if (!conf->ndsPath || strncmp(conf->ndsPath, "sd:/", 4) != 0
+	 || !conf->quitPath || !conf->quitPath[0] || strcmp(conf->quitPath, RA_SYNC_PATH) == 0) {
+		return;
+	}
+	const char* name = strrchr(conf->ndsPath, '/');
+	name = name ? name + 1 : conf->ndsPath;
+	const std::string setPath = std::string(RA_DIR "/sets/") + name + ".txt";
+	struct stat st;
+	if (stat(setPath.c_str(), &st) != 0 || stat(RA_SYNC_PATH, &st) != 0) {
+		return;
+	}
+	FILE* f = fopen(RA_RETURN_PATH, "wb");
+	if (!f) {
+		return;
+	}
+	fputs(conf->quitPath, f);
+	fclose(f);
+	conf->quitPath = strdup(RA_SYNC_PATH);
+}
