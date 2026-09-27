@@ -698,13 +698,10 @@ static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
 							if (optionsItems[i] == OPTIONS_RA_MODE) cursorPosition = i;
 						}
 					} else if (boolQuestion(raHardcoreQuestion)) {
-						// Entering hardcore: saved for the restart, which leaves
-						// cheats and anything changed so far behind
+						// Entering hardcore: the card engine saves it and
+						// restarts the console into the loader, which leaves
+						// the cheats and anything changed so far behind
 						raSendMode(1);
-						extern bool exceptionPrinted;
-						exceptionPrinted = false;
-						sharedAddr[3] = 0x52534554; // TESR
-						sharedAddr[4] = 0x54455352; // RSET
 						return;
 					}
 					break;

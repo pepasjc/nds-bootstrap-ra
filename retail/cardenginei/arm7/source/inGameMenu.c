@@ -74,15 +74,29 @@ static const struct { u8 frame; u16 timer; } raChimeNotes[] = {
 };
 static u8 raChimeVolumes[16];
 static int raChimeChannel;
+static bool raChimeBorrowed; // the game was using the channel
 
 static void raChimeStart(void) {
 	raChimeChannel = -1;
+	int quietest = 8;
 	for (int i = 0; i < 16; i++) {
 		raChimeVolumes[i] = SOUND_VOL_BYTE(i);
 		SOUND_VOL_BYTE(i) = 0;
-		if (raChimeChannel < 0 && i >= 8 && i <= 13 && !(SCHANNEL_CR(i) & SCHANNEL_ENABLE)) {
-			raChimeChannel = i;
+		if (i >= 8 && i <= 13) {
+			if (raChimeChannel < 0 && !(SCHANNEL_CR(i) & SCHANNEL_ENABLE)) {
+				raChimeChannel = i;
+			}
+			if (raChimeVolumes[i] < raChimeVolumes[quietest]) {
+				quietest = i;
+			}
 		}
+	}
+	// All six tone channels busy (music made of tones): borrow the quietest.
+	// Its timer is write-only, so it can't be put back as it was; it stays
+	// off afterwards until the game plays its next note.
+	raChimeBorrowed = raChimeChannel < 0;
+	if (raChimeBorrowed) {
+		raChimeChannel = quietest;
 	}
 	REG_MASTER_VOLUME = 127;
 }
@@ -113,7 +127,7 @@ static void raChimeStop(void) {
 		SCHANNEL_CR(raChimeChannel) = 0;
 	}
 	for (int i = 0; i < 16; i++) {
-		if (i != raChimeChannel) {
+		if (i != raChimeChannel || raChimeBorrowed) {
 			SOUND_VOL_BYTE(i) = raChimeVolumes[i];
 		}
 	}
@@ -260,6 +274,13 @@ void inGameMenu(u32 mode) {
 				{
 					extern void raSetHardcore(bool on);
 					raSetHardcore(sharedAddr[0] != 0);
+					if (sharedAddr[0] != 0) {
+						// Entering hardcore: restart through the loader, which
+						// leaves the cheats out (the menu's quick in-memory
+						// reset skips it, and froze here)
+						extern void forceGameReboot(void);
+						forceGameReboot();
+					}
 					break;
 				}
 				#endif
