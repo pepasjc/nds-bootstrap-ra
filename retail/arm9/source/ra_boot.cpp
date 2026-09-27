@@ -223,13 +223,45 @@ static void unlaunchAutoload(const char* path) {
 	DC_FlushAll();
 }
 
+// Whether the ROM is still the one its set was made for.  RA Prep writes
+// <rom>.id with the ROM's size and header CRC (hex) on the first line, then
+// its hash; both are free to check here, and a different dump (region,
+// revision) or a replaced file changes them.  Missing .id: not checked yet.
+static bool romMatchesId(const char* romPath, const char* idPath) {
+	char expected[64] = {0};
+	FILE* f = fopen(idPath, "rb");
+	if (!f) {
+		return false;
+	}
+	fgets(expected, sizeof(expected), f);
+	fclose(f);
+	expected[strcspn(expected, "\r\n")] = '\0';
+
+	struct stat st;
+	u16 crc = 0;
+	f = fopen(romPath, "rb");
+	if (!f || stat(romPath, &st) != 0) {
+		if (f) fclose(f);
+		return false;
+	}
+	fseek(f, 0x15E, SEEK_SET);
+	fread(&crc, sizeof(crc), 1, f);
+	fclose(f);
+
+	char actual[64];
+	snprintf(actual, sizeof(actual), "%lx %04x", (unsigned long)st.st_size, crc);
+	return strcmp(actual, expected) == 0;
+}
+
 // A game with no achievement set yet goes through RA Prep first: the loader
 // saves the game's path in prep.txt and restarts the console into
 // raprep.nds (through Unlaunch, in full DSi mode for WPA2), which looks the
 // ROM up on RetroAchievements, writes its set (or <rom>.none when RA has no
 // set for it) and starts this loader again.  If the fetch failed, raprep
 // writes skip_once.txt so that the next start plays without a set instead of
-// trying again at once.  Only returns when the game should just start.
+// trying again at once.  A set whose <rom>.id doesn't match the ROM (or has
+// none yet) goes through RA Prep too, which hashes the ROM again and keeps
+// or replaces the set.  Only returns when the game should just start.
 void raRedirectPrep(configuration* conf, const char* bootstrapPath) {
 	if (!conf->ndsPath || strncmp(conf->ndsPath, "sd:/", 4) != 0 || !isDSiMode()) {
 		return;
@@ -255,7 +287,8 @@ void raRedirectPrep(configuration* conf, const char* bootstrapPath) {
 	const char* name = strrchr(conf->ndsPath, '/');
 	name = name ? name + 1 : conf->ndsPath;
 	const std::string setPath = std::string(RA_DIR "/sets/") + name;
-	if (stat((setPath + ".txt").c_str(), &st) == 0 || stat((setPath + ".none").c_str(), &st) == 0) {
+	if ((stat((setPath + ".txt").c_str(), &st) == 0 || stat((setPath + ".none").c_str(), &st) == 0)
+	 && romMatchesId(conf->ndsPath, (setPath + ".id").c_str())) {
 		return;
 	}
 
