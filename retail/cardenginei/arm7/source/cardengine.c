@@ -1109,6 +1109,8 @@ static struct RaPopup raMenuInfo;
 static bool raPopupQueued = false;
 static bool raMenuRequested = false;
 static const struct RaPopup* raLoadPayload = NULL; // copied in with the menu
+u32 raSoundSize = 0;   // unlock sound at RA_REGION + RA_SOUND_OFFSET (0: none)
+u32 raSoundFormat = 0; // RA_SOUND_*
 
 // Show a RetroAchievements unlock at the next VBlank that can take it.
 void raQueuePopup(const char* title, u32 points) {
@@ -1927,6 +1929,13 @@ static void raLoad(void) {
 		fileRead((char*)raEngine, &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_ENGINE_OFFSET, boot->engineSize);
 	}
 	fileRead((char*)(RA_REGION + RA_SET_OFFSET), &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_SET_OFFSET, boot->setSize);
+	// Unlock sound for the popup (inGameMenu.c), from sd:/_nds/ra/unlock.wav
+	raSoundSize = 0;
+	if (boot->soundSize && boot->soundSize <= RA_SOUND_MAX && (boot->soundFormat & RA_SOUND_RATE_MASK)) {
+		fileRead((char*)(RA_REGION + RA_SOUND_OFFSET), &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_STAGE_SOUND, boot->soundSize);
+		raSoundSize = boot->soundSize;
+		raSoundFormat = boot->soundFormat;
+	}
 	if (raEngine->magic != RA_ENGINE_MAGIC) {
 		return;
 	}

@@ -9,6 +9,7 @@
 
 #include "igm_text.h"
 #include "ra_popup.h"
+#include "ra_engine.h"
 #include "locations.h"
 #include "cardengine.h"
 #include "fpsAdjust.h"
@@ -56,10 +57,17 @@ void biosRead(void* dst, const void* src, u32 len)
 volatile int timeTillStatusRefresh = 7;
 
 #ifndef TWLSDK
-// RetroAchievements unlock chime and LED while the popup is up (the game is
-// paused).  The game's channels are silenced one by one instead of through
-// the master volume, a free tone channel (8-13) plays a short rising
-// arpeggio, and the DSi camera LED blinks.  All is put back afterwards.
+// RetroAchievements unlock sound while the popup is up (the game is paused).
+// The game's channels are silenced one by one instead of through the master
+// volume, and a free channel plays either the sample from
+// sd:/_nds/ra/unlock.wav or, without one, a short rising tone arpeggio.
+// The sound hardware can't read the sample where it is kept (0x0CE...,
+// beyond its 27-bit addresses), so it plays from a stretch of game RAM that
+// is saved first and put back afterwards, as the in-game menu itself does.
+// (Sound registers other than SOUNDxCNT are write-only: a busy channel can't
+// be borrowed and restored, so no free channel means no sound.)
+#define RA_SOUND_BORROW 0x02360000
+extern u32 raSoundSize, raSoundFormat;
 #define RA_CHIME_FRAMES 40
 #define RA_CHIME_VOLUME 90
 // Tone channel timer for a frequency: 33.513982 MHz / 2, 8 steps a period
@@ -79,20 +87,28 @@ static void raChimeStart(void) {
 	for (int i = 0; i < 16; i++) {
 		raChimeVolumes[i] = SOUND_VOL_BYTE(i);
 		SOUND_VOL_BYTE(i) = 0;
-		if (raChimeChannel < 0 && i >= 8 && i <= 13 && !(SCHANNEL_CR(i) & SCHANNEL_ENABLE)) {
+		// A sample plays on any channel, the tones only on 8-13
+		if (raChimeChannel < 0 && (raSoundSize || (i >= 8 && i <= 13)) && !(SCHANNEL_CR(i) & SCHANNEL_ENABLE)) {
 			raChimeChannel = i;
 		}
 	}
 	REG_MASTER_VOLUME = 127;
-	i2cWriteRegister(0x4A, 0x31, 0x01); // Camera LED on
+	const int ch = raChimeChannel;
+	if (ch >= 0 && raSoundSize) {
+		tonccpy((void*)(RA_REGION + RA_SOUND_SAVE_OFFSET), (void*)RA_SOUND_BORROW, raSoundSize);
+		tonccpy((void*)RA_SOUND_BORROW, (void*)(RA_REGION + RA_SOUND_OFFSET), raSoundSize);
+		SCHANNEL_SOURCE(ch) = RA_SOUND_BORROW;
+		SCHANNEL_REPEAT_POINT(ch) = 0;
+		SCHANNEL_LENGTH(ch) = raSoundSize / 4;
+		SCHANNEL_TIMER(ch) = SOUND_FREQ(raSoundFormat & RA_SOUND_RATE_MASK);
+		SCHANNEL_CR(ch) = SCHANNEL_ENABLE | SOUND_ONE_SHOT | SOUND_PAN(64) | 127
+		 | ((raSoundFormat & RA_SOUND_PCM16) ? SOUND_FORMAT_16BIT : SOUND_FORMAT_8BIT);
+	}
 }
 
 static void raChimeTick(int frame) {
-	if (frame % 6 == 0) {
-		i2cWriteRegister(0x4A, 0x31, ((frame / 6) & 1) ? 0x00 : 0x01); // Blink
-	}
 	const int ch = raChimeChannel;
-	if (ch < 0 || frame > RA_CHIME_FRAMES) {
+	if (ch < 0 || raSoundSize || frame > RA_CHIME_FRAMES) {
 		return;
 	}
 	if (frame == RA_CHIME_FRAMES) {
@@ -114,6 +130,9 @@ static void raChimeTick(int frame) {
 static void raChimeStop(void) {
 	if (raChimeChannel >= 0) {
 		SCHANNEL_CR(raChimeChannel) = 0;
+		if (raSoundSize) {
+			tonccpy((void*)RA_SOUND_BORROW, (void*)(RA_REGION + RA_SOUND_SAVE_OFFSET), raSoundSize);
+		}
 	}
 	for (int i = 0; i < 16; i++) {
 		if (i != raChimeChannel) {
@@ -121,7 +140,6 @@ static void raChimeStop(void) {
 		}
 	}
 	REG_MASTER_VOLUME = 0; // inGameMenu() turns it back up on leaving
-	i2cWriteRegister(0x4A, 0x31, 0x00); // Camera LED off
 }
 #endif
 

@@ -139,6 +139,78 @@ static u32 readConfig(void) {
 	return config;
 }
 
+static u32 le32(const u8* p) {
+	return p[0] | (p[1] << 8) | (p[2] << 16) | ((u32)p[3] << 24);
+}
+
+// sd:/_nds/ra/unlock.wav, played with the unlock popup: staged as mono
+// signed PCM for the DS sound hardware, 16-bit if it fits RA_SOUND_MAX, else
+// 8-bit; rates above 32 kHz are divided down, and a long sound is cut.
+// Without it the card engine plays a short tone arpeggio.
+static void stageUnlockSound(FILE* dump, RaBootHeader* boot) {
+	std::vector<u8> wav;
+	if (!readFile(RA_DIR "/unlock.wav", wav, 1024 * 1024) || wav.size() < 44
+	 || memcmp(wav.data(), "RIFF", 4) != 0 || memcmp(wav.data() + 8, "WAVE", 4) != 0) {
+		return;
+	}
+	u32 format = 0, channels = 0, rate = 0, bits = 0, dataSize = 0;
+	const u8* data = NULL;
+	for (size_t pos = 12; pos + 8 <= wav.size();) {
+		const u8* chunk = wav.data() + pos;
+		u32 size = le32(chunk + 4);
+		if (size > wav.size() - pos - 8) {
+			size = wav.size() - pos - 8;
+		}
+		if (memcmp(chunk, "fmt ", 4) == 0 && size >= 16) {
+			format = chunk[8] | (chunk[9] << 8);
+			channels = chunk[10] | (chunk[11] << 8);
+			rate = le32(chunk + 12);
+			bits = chunk[22] | (chunk[23] << 8);
+		} else if (memcmp(chunk, "data", 4) == 0) {
+			data = chunk + 8;
+			dataSize = size;
+		}
+		pos += 8 + size + (size & 1);
+	}
+	if (format != 1 || !data || (bits != 8 && bits != 16) || channels < 1 || channels > 2
+	 || rate < 4000 || rate > 96000) {
+		return;
+	}
+	const u32 frameBytes = channels * bits / 8;
+	u32 step = 1;
+	while (rate / step > 32000) {
+		step++;
+	}
+	u32 frames = dataSize / frameBytes / step;
+	const bool pcm16 = frames * 2 <= RA_SOUND_MAX;
+	const u32 maxFrames = pcm16 ? RA_SOUND_MAX / 2 : RA_SOUND_MAX;
+	if (frames > maxFrames) {
+		frames = maxFrames;
+	}
+	std::vector<u8> out(((pcm16 ? frames * 2 : frames) + 3) & ~3); // whole words
+	for (u32 i = 0; i < frames; i++) {
+		s32 sum = 0;
+		for (u32 s = 0; s < step; s++) {
+			const u8* f = data + (i * step + s) * frameBytes;
+			for (u32 c = 0; c < channels; c++) {
+				sum += (bits == 16) ? (s16)(f[c * 2] | (f[c * 2 + 1] << 8)) : ((s32)f[c] - 128) * 256;
+			}
+		}
+		const s32 v = sum / (s32)(step * channels);
+		if (pcm16) {
+			out[i * 2] = v & 0xFF;
+			out[i * 2 + 1] = (v >> 8) & 0xFF;
+		} else {
+			out[i] = (u8)(s8)(v >> 8);
+		}
+	}
+	fseek(dump, RA_DUMP_BOOT_OFFSET + RA_STAGE_SOUND, SEEK_SET);
+	if (fwrite(out.data(), 1, out.size(), dump) == out.size()) {
+		boot->soundSize = out.size();
+		boot->soundFormat = (rate / step) | (pcm16 ? RA_SOUND_PCM16 : 0);
+	}
+}
+
 void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 	if (!dsiFeatures() || conf->b4dsMode || conf->bootstrapOnFlashcard || conf->gameOnFlashcard) {
 		return;
@@ -183,6 +255,8 @@ void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 			fseek(dump, RA_DUMP_BOOT_OFFSET + RA_STAGE_WRAM_CODE, SEEK_SET);
 			fwrite(wramCode.data(), 1, wramCode.size(), dump);
 		}
+
+		stageUnlockSound(dump, boot);
 
 		fseek(dump, RA_DUMP_BOOT_OFFSET + RA_ENGINE_OFFSET, SEEK_SET);
 		fwrite(engine.data(), 1, engine.size(), dump);

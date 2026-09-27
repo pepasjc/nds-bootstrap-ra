@@ -78,7 +78,7 @@ static void heapInit(void) {
 	arenas[0].start = __wram_heap_start;
 	arenas[0].end = __wram_heap_end;
 	arenas[1].start = (u8*)(RA_REGION + RA_HEAP_OFFSET);
-	arenas[1].end = (u8*)(RA_REGION + RA_REGION_SIZE - RA_STACK_SIZE);
+	arenas[1].end = (u8*)(RA_REGION + RA_ENGINE_AREA - RA_STACK_SIZE);
 	for (int i = 0; i < 2; i++) {
 		arenas[i].ptr = arenas[i].start;
 		arenas[i].top = NULL;

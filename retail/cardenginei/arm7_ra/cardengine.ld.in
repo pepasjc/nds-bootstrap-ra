@@ -7,7 +7,7 @@ MEMORY {
 	ram	: ORIGIN = RA_REGION + RA_ENGINE_OFFSET, LENGTH = RA_ENGINE_MAX
 }
 
-__ra_stack_top = RA_REGION + RA_REGION_SIZE;
+__ra_stack_top = RA_REGION + RA_ENGINE_AREA;
 /* No WRAM heap arena in the main-RAM variant */
 __wram_heap_start = 0;
 __wram_heap_end = 0;

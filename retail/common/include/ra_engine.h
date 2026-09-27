@@ -20,11 +20,19 @@
 //   +0x00000  RaBootHeader
 //   +0x00800  engine binary (cardenginei_arm7_ra.bin), linked here
 //   +0x20000  achievement set text (see ra_connect.render_set)
-//   +0x40000  engine heap (region only), stack at the top
+//   +0x40000  engine heap (region only), stack at the top (RA_ENGINE_AREA)
+//   +0x80000  unlock sound sample
+//   +0x90000  game RAM saved while the sample plays from it
 
 #define RA_REGION             0x0CE00000
 #define RA_ROM_CACHE_SKIP     RA_REGION
-#define RA_REGION_SIZE        0x80000
+#define RA_REGION_SIZE        0xA0000 // engine area + unlock sound (skipped by the ROM cache)
+#define RA_ENGINE_AREA        0x80000 // header, engine, set, heap and stack
+// Unlock sound: the sample (from sd:/_nds/ra/unlock.wav) and, while it
+// plays, the game RAM it is borrowed into (inGameMenu.c)
+#define RA_SOUND_OFFSET       0x80000
+#define RA_SOUND_MAX          0x10000
+#define RA_SOUND_SAVE_OFFSET  0x90000
 #define RA_ENGINE_OFFSET      0x800
 #define RA_ENGINE_MAX         (0x20000 - RA_ENGINE_OFFSET)
 #define RA_SET_OFFSET         0x20000
@@ -45,6 +53,7 @@
 // Staging only, after the set: the fast-RAM variant's two parts
 #define RA_STAGE_WRAM_MAIN    0x40000
 #define RA_STAGE_WRAM_CODE    0x60000
+#define RA_STAGE_SOUND        0x80000
 #define RA_DUMP_UNLOCK_OFFSET 0x01FE0000
 #define RA_DUMP_PROBE_OFFSET  0x01FF0000
 #define RA_UNLOCK_RECORDS     1024
@@ -53,7 +62,11 @@
 #define RA_ENGINE_MAGIC 0x4E454152 // 'RAEN'
 #define RA_UNLOCK_MAGIC 0x31554152 // 'RAU1'
 
-#define RA_MAX_DONE ((RA_ENGINE_OFFSET - 0x20) / 4)
+#define RA_MAX_DONE ((RA_ENGINE_OFFSET - 0x28) / 4)
+
+// RaBootHeader.soundFormat
+#define RA_SOUND_RATE_MASK    0xFFFF     // samples per second
+#define RA_SOUND_PCM16        BIT(16)    // else signed 8-bit
 
 // RaBootHeader.config, from sd:/_nds/ra/config.txt
 #define RA_CFG_WRAM           (1 << 0)   // use the fast-RAM variant if it fits
@@ -76,6 +89,8 @@ struct RaBootHeader {
 	u32 config;       // RA_CFG_*
 	u32 wramMainSize; // fast-RAM variant parts, staged at RA_STAGE_WRAM_*
 	u32 wramCodeSize; //   (0: not staged)
+	u32 soundSize;    // unlock sound, staged at RA_STAGE_SOUND (0: none)
+	u32 soundFormat;  // RA_SOUND_*
 	u32 done[RA_MAX_DONE];
 };
 
