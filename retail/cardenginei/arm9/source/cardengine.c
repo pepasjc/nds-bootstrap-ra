@@ -1705,6 +1705,10 @@ void myIrqHandlerIPC(void) {
 		case 0x9:
 			inGameMenu((s32*)0);
 			break;
+		case 0xB:
+			// RetroAchievements: ARM7 reads game RAM next; write our cache back
+			DC_FlushAll();
+			break;
 	}
 
 	if (sharedAddr[4] == 0x57534352) {

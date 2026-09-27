@@ -1958,6 +1958,9 @@ static void raVBlank(void) {
 	raFrame++;
 	if (raState == 1) {
 		raFramesDue++;
+		// The game's ARM9 data cache is write-back: have it cleaned, or the
+		// engine reads stale RAM for the values the game touches most
+		IPC_SendSync(0xB);
 	}
 
 	// Achievements list: Select+Down held for half a second, without L so
