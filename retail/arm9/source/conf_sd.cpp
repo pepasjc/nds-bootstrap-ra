@@ -74,6 +74,7 @@ extern std::string cheatFilePath;
 extern std::string ramDumpPath;
 extern void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath);
 extern void raRedirectQuit(configuration* conf);
+extern void raRedirectPrep(configuration* conf, const char* bootstrapPath);
 extern std::string srParamsFilePath;
 extern std::string screenshotPath;
 extern std::string apFixOverlaysPath;
@@ -852,6 +853,9 @@ int loadFromSD(configuration* conf, const char *bootstrapPath) {
 	conf->bootstrapOnFlashcard = ((bootstrapPath[0] == 'f' && bootstrapPath[1] == 'a' && bootstrapPath[2] == 't') || !conf->sdFound);
 
 	load_conf(conf, conf->bootstrapOnFlashcard ? "fat:/_nds/nds-bootstrap.ini" : "sd:/_nds/nds-bootstrap.ini");
+
+	// RetroAchievements: fetch a missing achievement set before the game
+	raRedirectPrep(conf, bootstrapPath);
 
 	conf->initDisc = (REG_SCFG_EXT == 0);
 

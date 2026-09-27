@@ -587,7 +587,9 @@ int main(int argc, char** argv) {
 
 	configuration* conf = (configuration*)malloc(sizeof(configuration));
 
-	int status = loadFromSD(conf, argv[0]);
+	// Unlaunch may start the loader without argv (RetroAchievements prep
+	// restarts into it); loadFromSD then falls back to the nightly path
+	int status = loadFromSD(conf, (argc > 0 && argv[0]) ? argv[0] : "");
 	sdFound = (conf->sdFound && !conf->b4dsMode);
 	bootstrapOnFlashcard = conf->bootstrapOnFlashcard;
 

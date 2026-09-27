@@ -181,6 +181,10 @@ int main(void) {
 			my_sdmmc_get_cid(true, (u32*)0x2FFD7BC);	// Get eMMC CID
 			*(u32*)(0x2FFFD0C) = 0;
 		}
+		if (*(u32*)(0x2FFFD0C) == 0x544F4252) {	// 'RBOT': RetroAchievements prep (arm9 ra_boot.cpp)
+			i2cWriteRegister(0x4A, 0x70, 0x01);
+			i2cWriteRegister(0x4A, 0x11, 0x01);	// Restart; Unlaunch boots its auto-load path
+		}
 		swiIntrWait(0, IRQ_FIFO_NOT_EMPTY);
 	}
 	
