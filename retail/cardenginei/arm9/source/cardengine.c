@@ -1615,6 +1615,19 @@ void myIrqHandlerVcount(void) {
 }
 
 //---------------------------------------------------------------------------------
+// Write every dirty data cache line back to RAM, keeping the lines cached.
+// (DC_FlushAll in card_engine_header.s is the tail of cacheFlush, not a
+// function of its own.)  4KB cache: 4 segments of 32 lines of 32 bytes.
+__attribute__((target("arm"), noinline, unused))
+static void raCleanDCache(void) {
+	for (u32 segment = 0; segment < 4; segment++) {
+		for (u32 line = 0; line < 0x1000/4; line += 32) {
+			asm volatile("mcr p15, 0, %0, c7, c10, 2" :: "r"((segment << 30) | line));
+		}
+	}
+	asm volatile("mcr p15, 0, %0, c7, c10, 4" :: "r"(0)); // drain write buffer
+}
+
 void myIrqHandlerIPC(void) {
 //---------------------------------------------------------------------------------
 	#ifdef DEBUG
@@ -1707,7 +1720,7 @@ void myIrqHandlerIPC(void) {
 			break;
 		case 0xB:
 			// RetroAchievements: ARM7 reads game RAM next; write our cache back
-			DC_FlushAll();
+			raCleanDCache();
 			break;
 	}
 
