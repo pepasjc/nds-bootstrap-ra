@@ -395,9 +395,6 @@ static void load_conf(configuration* conf, const char* fn) {
 	// NDS path used when quitting game
 	conf->quitPath = strdup(config_file.fetch("NDS-BOOTSTRAP", "QUIT_PATH").c_str());
 
-	// RetroAchievements: quit through RA Sync, which uploads the unlocks
-	raRedirectQuit(conf);
-
 	// GBA path
 	// conf->gbaPath = strdup(config_file.fetch("NDS-BOOTSTRAP", "GBA_PATH").c_str());
 
@@ -855,7 +852,10 @@ int loadFromSD(configuration* conf, const char *bootstrapPath) {
 
 	load_conf(conf, conf->bootstrapOnFlashcard ? "fat:/_nds/nds-bootstrap.ini" : "sd:/_nds/nds-bootstrap.ini");
 
-	// RetroAchievements: fetch a missing achievement set before the game
+	// RetroAchievements: quit through RA Sync, which uploads the unlocks (after
+	// load_conf: it needs the console model), and fetch a missing
+	// achievement set before the game
+	raRedirectQuit(conf);
 	raRedirectPrep(conf, bootstrapPath);
 
 	conf->initDisc = (REG_SCFG_EXT == 0);

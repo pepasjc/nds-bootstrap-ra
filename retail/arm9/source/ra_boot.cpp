@@ -286,6 +286,28 @@ bool raHardcoreGame(const configuration* conf) {
 	return stat((std::string(RA_DIR "/sets/") + name + ".txt").c_str(), &st) == 0;
 }
 
+// sd:/_nds/ra/loader_status.txt: what this start found, for troubleshooting
+// (on a 3DS especially).  The key id is RA Tool's: both must show the same.
+static void writeStatus(const configuration* conf, bool keyed, bool haveSet, bool setSigned) {
+	FILE* f = fopen(RA_DIR "/loader_status.txt", "wb");
+	if (!f) {
+		return;
+	}
+	char keyId[9] = "none";
+	if (keyed) {
+		static const char label[] = "RA-NDS key id";
+		u8 mac[32];
+		raHmacSha256(raKey, label, sizeof(label) - 1, mac);
+		snprintf(keyId, sizeof(keyId), "%02x%02x%02x%02x", mac[0], mac[1], mac[2], mac[3]);
+	}
+	const char* name = strrchr(conf->ndsPath, '/');
+	fprintf(f, "game %s\nconsole model %d\nconsole key %s\nset %s\nconfig %08lx\n",
+		name ? name + 1 : conf->ndsPath, conf->consoleModel, keyId,
+		!haveSet ? "missing" : setSigned ? "loaded" : "not signed by this console (run RA Tool / RA Prep)",
+		(unsigned long)readConfig());
+	fclose(f);
+}
+
 void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 	if (!dsiFeatures() || conf->b4dsMode || conf->bootstrapOnFlashcard || conf->gameOnFlashcard) {
 		return;
@@ -309,8 +331,10 @@ void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 	std::string setPath = std::string(RA_DIR "/sets/") + name + ".txt";
 
 	std::vector<u8> set, engine;
-	if (keyed && readFile(setPath.c_str(), set, RA_SET_MAX - 1) && setSignatureOk(name, set)
-	 && readFile("nitro:/cardenginei_arm7_ra.bin", engine, RA_ENGINE_MAX)) {
+	const bool haveSet = keyed && readFile(setPath.c_str(), set, RA_SET_MAX - 1);
+	const bool setSigned = haveSet && setSignatureOk(name, set);
+	writeStatus(conf, keyed, haveSet, setSigned);
+	if (setSigned && readFile("nitro:/cardenginei_arm7_ra.bin", engine, RA_ENGINE_MAX)) {
 		boot->config = readConfig();
 		// "game\t<id>\t<md5>\t<title>" is the second line
 		set.push_back(0); // for strstr; not written out
@@ -419,7 +443,9 @@ static bool romMatchesId(const char* fingerprint, const char* idPath) {
 // none yet) goes through RA Prep too, which hashes the ROM again and keeps
 // or replaces the set.  Only returns when the game should just start.
 void raRedirectPrep(configuration* conf, const char* bootstrapPath) {
-	if (!conf->ndsPath || strncmp(conf->ndsPath, "sd:/", 4) != 0 || !isDSiMode()) {
+	// Not on a 3DS (console model 2 and up): no Unlaunch to restart through.
+	// There RA Tool prepares the sets.
+	if (!conf->ndsPath || strncmp(conf->ndsPath, "sd:/", 4) != 0 || !isDSiMode() || conf->consoleModel >= 2) {
 		return;
 	}
 	struct stat st;
@@ -481,7 +507,9 @@ void raRedirectPrep(configuration* conf, const char* bootstrapPath) {
 // Quitting boots the quit path through Unlaunch in full DSi mode, which the
 // DSi WiFi (WPA2) needs.
 void raRedirectQuit(configuration* conf) {
-	if (!conf->ndsPath || strncmp(conf->ndsPath, "sd:/", 4) != 0
+	// Not on a 3DS either (RA Sync returns through Unlaunch); there RA Tool
+	// sends the unlocks
+	if (!conf->ndsPath || strncmp(conf->ndsPath, "sd:/", 4) != 0 || conf->consoleModel >= 2
 	 || !conf->quitPath || !conf->quitPath[0] || strcmp(conf->quitPath, RA_SYNC_PATH) == 0) {
 		return;
 	}
