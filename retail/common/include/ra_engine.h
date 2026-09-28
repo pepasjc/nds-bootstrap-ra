@@ -27,12 +27,13 @@
 #define RA_REGION_SIZE        0x80000
 #define RA_ENGINE_AREA        RA_REGION_SIZE // header, engine, set, heap and stack
 #define RA_ENGINE_OFFSET      0x800
-#define RA_ENGINE_MAX         (0x20000 - RA_ENGINE_OFFSET - 0x40) // the key after it
-// Console key for signing unlocks: { RA_KEY_MAGIC, 32 bytes }.  The loader
-// derives it (build secret + eMMC CID) and leaves it here in RAM only; it
-// is never written to the SD card.
-#define RA_KEY_LOCATION       (RA_REGION + RA_SET_OFFSET - 0x40)
-#define RA_KEY_MAGIC          0x594B4152 // 'RAKY'
+#define RA_ENGINE_MAX         (0x20000 - RA_ENGINE_OFFSET)
+// Console key for signing unlocks: SHA-256 of the build secret
+// (ra_secret.h), the eMMC CID (RaBootHeader.cid) and RA_KEY_LABEL.  The
+// engine derives it at start (RAM written by the loader doesn't survive
+// the boot), the loader and RA Sync (ra-nds) derive the same; it is never
+// written to the SD card.
+#define RA_KEY_LABEL          "RetroAchievements DSi console key 1"
 #define RA_SET_OFFSET         0x20000
 #define RA_SET_MAX            0x20000
 #define RA_HEAP_OFFSET        0x40000
@@ -63,7 +64,7 @@
 #define RA_ENGINE_MAGIC 0x4E454152 // 'RAEN'
 #define RA_UNLOCK_MAGIC 0x32554152 // 'RAU2': signed (struct RaSignedUnlock)
 
-#define RA_MAX_DONE ((RA_ENGINE_OFFSET - 0x20) / 4)
+#define RA_MAX_DONE ((RA_ENGINE_OFFSET - 0x30) / 4)
 
 
 // RaBootHeader.config, from sd:/_nds/ra/config.txt
@@ -91,6 +92,7 @@ struct RaBootHeader {
 	u32 config;       // RA_CFG_*
 	u32 wramMainSize; // fast-RAM variant parts, staged at RA_STAGE_WRAM_*
 	u32 wramCodeSize; //   (0: not staged)
+	u8 cid[16];       // eMMC CID, for the console key (all zero: none)
 	u32 done[RA_MAX_DONE];
 };
 
@@ -168,8 +170,8 @@ struct RaEngineHeader {
 	char title[63];
 	struct RaAchievement* achievements;
 	u32 count;
-	// HMAC-SHA256 of data under the console key at RA_KEY_LOCATION (zeros
-	// without a key, which no check accepts)
+	// HMAC-SHA256 of data under the console key (zeros without a CID,
+	// which no check accepts)
 	void (*sign)(const void* data, u32 size, u8 mac[32]);
 };
 

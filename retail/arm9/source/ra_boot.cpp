@@ -29,8 +29,9 @@
 // sets; it stays in RAM and never goes to the SD card.
 // ---------------------------------------------------------------------------
 
-static const char raKeyLabel[] = "RetroAchievements DSi console key 1";
+static const char raKeyLabel[] = RA_KEY_LABEL;
 static u8 raKey[32];
+static u8 raCid[16]; // for the engine, which derives the key itself
 static int raKeyState = 0; // 0: not tried, 1: ready, -1: no CID
 
 static bool deriveKey(void) {
@@ -54,12 +55,12 @@ static bool deriveKey(void) {
 		raKeyState = -1;
 		return false;
 	}
-	u8 id[16];
+	u8* id = raCid;
 	for (int i = 0; i < 16; i++) id[i] = cid[i];
 	RaSha256 s;
 	raSha256Init(&s);
 	raSha256Update(&s, raBuildSecret, sizeof(raBuildSecret));
-	raSha256Update(&s, id, sizeof(id));
+	raSha256Update(&s, id, sizeof(raCid));
 	raSha256Update(&s, raKeyLabel, sizeof(raKeyLabel) - 1);
 	raSha256Final(&s, raKey);
 	raKeyState = 1;
@@ -291,19 +292,15 @@ void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 	}
 	// No console key (no eMMC CID): unlocks couldn't be signed, so no RA
 	const bool keyed = deriveKey();
-	if (keyed) {
-		// For the engine's signatures, in RAM only (ra_engine.h)
-		u32* key = (u32*)RA_KEY_LOCATION;
-		key[0] = RA_KEY_MAGIC;
-		memcpy(key + 1, raKey, sizeof(raKey));
-		DC_FlushRange(key, 64);
-	}
 	FILE* dump = fopen(ramDumpPath.c_str(), "r+b");
 	if (!dump) {
 		return;
 	}
 
 	RaBootHeader* boot = (RaBootHeader*)calloc(1, RA_ENGINE_OFFSET);
+	if (keyed) {
+		memcpy(boot->cid, raCid, sizeof(boot->cid)); // the engine derives the key from it
+	}
 	boot->unlockSeq = flushUnlocks(dump);
 
 	// sd:/_nds/ra/sets/<ROM file name>.txt, written and signed by RA Prep

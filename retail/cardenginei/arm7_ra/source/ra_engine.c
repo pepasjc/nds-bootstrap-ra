@@ -17,6 +17,7 @@
 #include "ra_fast.h"
 #define RA_SHA256_LOW_STACK // called on the card engine's stack
 #include "ra_sha256.h"
+#include "ra_secret.h"
 
 #define RA_MAX_ACHIEVEMENTS 512
 #define PARSE_PER_FRAME 8
@@ -50,15 +51,32 @@ struct RaEngineHeader raEngineHeader __attribute__((section(".raheader"), used))
 	raSign,
 };
 
-// Unlock records are signed with the console key the loader left in RAM
-// (RA_KEY_LOCATION); without it the MAC is zeros, which no check accepts.
+// Unlock records are signed with the console key (ra_engine.h), derived in
+// raInit() from the eMMC CID in the boot header; without one the MAC is
+// zeros, which no check accepts.
+static u8 consoleKey[32];
+static bool haveKey;
+
+static void deriveConsoleKey(const struct RaBootHeader* boot) {
+	bool present = false;
+	for (int i = 0; i < 16; i++) present |= boot->cid[i] != 0;
+	haveKey = present;
+	if (!present) return;
+	static const char label[] = RA_KEY_LABEL;
+	RaSha256 s;
+	raSha256Init(&s);
+	raSha256Update(&s, raBuildSecret, sizeof(raBuildSecret));
+	raSha256Update(&s, boot->cid, sizeof(boot->cid));
+	raSha256Update(&s, label, sizeof(label) - 1);
+	raSha256Final(&s, consoleKey);
+}
+
 static void raSign(const void* data, u32 size, u8 mac[32]) {
-	const u32* key = (const u32*)RA_KEY_LOCATION;
-	if (key[0] != RA_KEY_MAGIC) {
+	if (!haveKey) {
 		memset(mac, 0, 32);
 		return;
 	}
-	raHmacSha256((const u8*)(key + 1), data, size, mac);
+	raHmacSha256(consoleKey, data, size, mac);
 }
 
 static u32 achievementCount;
@@ -250,6 +268,7 @@ int raInit(const struct RaHost* h) {
 	host = h;
 	raFastPoll = h->poll;
 	achievementCount = 0;
+	deriveConsoleKey(h->boot); // after the .bss clear: the key lives there
 
 	char* cursor = host->set;
 	char* end = host->set + host->setSize;
