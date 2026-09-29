@@ -2036,6 +2036,9 @@ static void raWriteProbe(void) {
 static struct RaNetHost raNetHost;
 static struct RaNetConfig raNetConfig;
 static bool raNetLogDirty = false;
+#define RA_NET_SENT_QUEUE 8
+static struct RaNetSent raNetSentQueue[RA_NET_SENT_QUEUE];
+static volatile int raNetSentCount = 0;
 
 // 33.5 MHz / 64 from the frame count and scanline: the game owns the
 // timers.  raFrame counts at VBlank (line 192), so the line counts from
@@ -2155,8 +2158,27 @@ static void raNetIdle(void) {
 	raNetBusy = true;
 	raNet->poll();
 	u32 seq, result;
-	while (raNet->result(&seq, &result)) {} // the blob logs them
+	while (raNet->result(&seq, &result)) {
+		// Sent ones are written to ramDump.bin (VBlank) for RA Sync to skip
+		const int oldIME = enterCriticalSection();
+		if (result == RA_AWARD_SENT && raNetSentCount < RA_NET_SENT_QUEUE) {
+			raNetSentQueue[raNetSentCount].seq = seq;
+			raNetSentQueue[raNetSentCount].result = result;
+			raNetSentCount++;
+		}
+		leaveCriticalSection(oldIME);
+	}
 	raNetBusy = false;
+}
+
+// VBlank, SD free, saveMutex held
+static void raNetWriteSent(void) {
+	for (int i = 0; i < raNetSentCount; i++) {
+		fileWrite((char*)&raNetSentQueue[i], &ramDumpFile,
+			RA_DUMP_SENT_OFFSET + (raNetSentQueue[i].seq % RA_UNLOCK_RECORDS) * sizeof(struct RaNetSent),
+			sizeof(struct RaNetSent));
+	}
+	raNetSentCount = 0;
 }
 
 static int raComboFrames = 0;
@@ -2223,7 +2245,7 @@ static void raVBlank(void) {
 	// Diagnostics only while the engine runs, not for every game
 	const bool probeDue = (raState == 1 && raFrame % 60 == 0);
 	const bool netLogDue = (raNetLogDirty && raFrame % 15 == 7);
-	if (!driveInited || readOngoing || !(raState == 0 || raPendingCount > 0 || probeDue || netLogDue)) {
+	if (!driveInited || readOngoing || !(raState == 0 || raPendingCount > 0 || probeDue || netLogDue || raNetSentCount > 0)) {
 		return;
 	}
 	if (!(valueBits & bootstrapOnFlashcard) && isSdEjected()) {
@@ -2242,6 +2264,9 @@ static void raVBlank(void) {
 	}
 	if (probeDue) {
 		raWriteProbe();
+	}
+	if (raNetSentCount > 0) {
+		raNetWriteSent();
 	}
 	if (netLogDue) {
 		raNetLogDirty = false;

@@ -104,6 +104,39 @@ static bool setSignatureOk(const char* name, const std::vector<u8>& set) {
 // unlocks.bin (only those that verify), with a line each in
 // unlocks_history.txt for reading.  Then the ring is cleared.  Returns the
 // number of records in unlocks.bin: the next sequence number.
+// Unlocks the in-game network stack already sent (RA_DUMP_SENT_OFFSET, by
+// the card engine): their MACs go to sent_ingame.txt, which RA Sync (ra-nds
+// ra_sync.c) checks so that it doesn't send them again.  The table is
+// cleared with the ring.
+#define RA_SENT_INGAME RA_DIR "/sent_ingame.txt"
+static void noteSentInGame(FILE* dump, const std::vector<RaSignedUnlock>& moved) {
+	std::vector<RaNetSent> sent(RA_UNLOCK_RECORDS);
+	fseek(dump, RA_DUMP_SENT_OFFSET, SEEK_SET);
+	if (fread(sent.data(), sizeof(RaNetSent), sent.size(), dump) != sent.size()) {
+		return;
+	}
+	FILE* f = NULL;
+	for (const RaSignedUnlock& u : moved) {
+		const RaNetSent& s = sent[u.record.seq % RA_UNLOCK_RECORDS];
+		if (s.seq != u.record.seq || s.result != RA_AWARD_SENT) {
+			continue;
+		}
+		if (!f && !(f = fopen(RA_SENT_INGAME, "ab"))) {
+			return;
+		}
+		for (int i = 0; i < 32; i++) {
+			fprintf(f, "%02x", u.mac[i]);
+		}
+		fputc('\n', f);
+	}
+	if (f) {
+		fclose(f);
+	}
+	std::fill(sent.begin(), sent.end(), RaNetSent{0, 0});
+	fseek(dump, RA_DUMP_SENT_OFFSET, SEEK_SET);
+	fwrite(sent.data(), sizeof(RaNetSent), sent.size(), dump);
+}
+
 static u32 flushUnlocks(FILE* dump) {
 	struct stat st;
 	if (!deriveKey()) {
@@ -150,6 +183,7 @@ static u32 flushUnlocks(FILE* dump) {
 			}
 			fclose(log);
 		}
+		noteSentInGame(dump, valid);
 		std::vector<u8> zero(RA_UNLOCK_RECORDS * sizeof(RaSignedUnlock), 0);
 		fseek(dump, RA_DUMP_UNLOCK_OFFSET, SEEK_SET);
 		fwrite(zero.data(), 1, zero.size(), dump);
