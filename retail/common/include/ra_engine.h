@@ -21,11 +21,14 @@
 //   +0x00800  engine binary (cardenginei_arm7_ra.bin), linked here
 //   +0x20000  achievement set text (see ra_connect.render_set)
 //   +0x40000  engine heap (region only), stack at the top
+//   +0x80000  in-game network stack (ranet.bin from ra-nds, ra_netblob.h),
+//             its memory, and at the very end its staged settings
 
 #define RA_REGION             0x0CE00000
 #define RA_ROM_CACHE_SKIP     RA_REGION
-#define RA_REGION_SIZE        0x80000
-#define RA_ENGINE_AREA        RA_REGION_SIZE // header, engine, set, heap and stack
+#define RA_REGION_SIZE        0x100000
+#define RA_ENGINE_AREA        0x80000 // header, engine, set, heap and stack
+#define RA_NET_OFFSET         0x80000 // = RA_NET_BLOB_ADDRESS - RA_REGION
 #define RA_ENGINE_OFFSET      0x800
 #define RA_ENGINE_MAX         (0x20000 - RA_ENGINE_OFFSET)
 // Console key for signing unlocks: SHA-256 of the build secret
@@ -52,6 +55,15 @@
 // Staging only, after the set: the fast-RAM variant's two parts
 #define RA_STAGE_WRAM_MAIN    0x40000
 #define RA_STAGE_WRAM_CODE    0x60000
+// ...and the in-game network stack: ranet.bin, then struct RaNetStage
+#define RA_STAGE_NET_BLOB     0x80000
+#define RA_NET_BLOB_MAX       0x60000
+#define RA_STAGE_NET_DATA     0xE0000
+// Where the card engine keeps RaNetStage until the blob copies it: the
+// end of the blob's area, which its image and .bss must stay below
+#define RA_NET_STAGE_TEMP     (RA_REGION + RA_REGION_SIZE - 0x2000)
+// ...and its log below that (RA_NETLOG_SIZE): the blob must end before it
+#define RA_NET_LOG_RAM        (RA_NET_STAGE_TEMP - RA_NETLOG_SIZE)
 // Softcore/hardcore chosen in the in-game menu, for the next start:
 // { RA_MODE_MAGIC, 0 or 1 }.  Overrides config.txt "hardcore".
 #define RA_DUMP_MODE_OFFSET   0x01FD0000
@@ -59,6 +71,11 @@
 #define RA_DUMP_UNLOCK_OFFSET 0x01FE0000
 #define RA_DUMP_PROBE_OFFSET  0x01FF0000
 #define RA_UNLOCK_RECORDS     512 // struct RaSignedUnlock, 96 bytes each
+// After the unlock ring (48K): what the in-game network stack did with each
+// unlock, { seq, enum RaNetAward } per ring slot, for RA Sync; then its log
+#define RA_DUMP_SENT_OFFSET   0x01FEC000
+#define RA_DUMP_NETLOG_OFFSET 0x01FED000
+#define RA_NETLOG_SIZE        0x3000
 
 #define RA_BOOT_MAGIC   0x48424152 // 'RABH'
 #define RA_ENGINE_MAGIC 0x4E454152 // 'RAEN'
@@ -78,8 +95,9 @@
 // the loader ignores it in config.txt and the menu, and the menu hides it.
 #define RA_HARDCORE_AVAILABLE 0
 #define RA_CFG_HARDCORE       (1 << 3)   // no cheats, RAM viewer/editor or refresh-rate change
+#define RA_CFG_NET            (1 << 4)   // in-game sending staged (RaNetStage)
 #define RA_CFG_INTERVAL_SHIFT 8          // evaluate every Nth frame (0/1: all)
-#define RA_CFG_DEFAULT        RA_CFG_WRAM
+#define RA_CFG_DEFAULT        (RA_CFG_WRAM | RA_CFG_NET)
 
 #ifndef RA_LINKER_SCRIPT
 
@@ -173,6 +191,29 @@ struct RaEngineHeader {
 	// HMAC-SHA256 of data under the console key (zeros without a CID,
 	// which no check accepts)
 	void (*sign)(const void* data, u32 size, u8 mac[32]);
+};
+
+// In-game sending (RA_CFG_NET): what the loader stages for ranet.bin
+// (ra-nds; ra_netblob.h) at RA_STAGE_NET_DATA.  Holds the RA token and the
+// TLS session secret, like account.txt and tls.bin already on the card.
+#define RA_NET_STAGE_MAGIC 0x534E4152 // 'RANS'
+#include "ra_netblob.h"
+#include "ra_netprofile.h"
+#include "ra_tlssession.h"
+struct RaNetStage {
+	u32 magic;
+	u32 blobSize;       // bytes staged at RA_STAGE_NET_BLOB
+	char user[RA_NET_USER_MAX];
+	char token[RA_NET_TOKEN_MAX];
+	RaNetProfile profile;
+	RaTlsSession tls;
+};
+
+// What the in-game network stack did with an unlock (RA_DUMP_SENT_OFFSET,
+// slot seq % RA_UNLOCK_RECORDS)
+struct RaNetSent {
+	u32 seq;
+	u32 result; // enum RaNetAward
 };
 
 #endif // RA_LINKER_SCRIPT

@@ -27,6 +27,7 @@
 #include <nds/timers.h>
 #include <nds/arm7/audio.h>
 #include <nds/arm7/i2c.h>
+#include <nds/arm7/serial.h> // in-game sending: the WiFi settings in flash
 #include <nds/memory.h> // tNDSHeader
 #include <nds/debug.h>
 
@@ -1870,6 +1871,8 @@ static u32 raRecord[16];
 static const u32 raProbeWatch[6] = {0x076a2c, 0x07b3b0, 0x17dd38, 0x17dd1c, 0x17dd20, 0x17dd30};
 static int raState = 0; // 0 = not loaded yet, 1 = running, -1 = off for this game
 static u32 raConfig = 0; // RA_CFG_*, from the boot header
+static const struct RaNetHeader* raNet; // in-game sending, below
+static void raNetLoad(void);
 
 // On a 3DS the loader pointed TWiLight Menu++'s autorun at RA Sync for a
 // game with achievements (ra_boot.cpp raRedirectQuit), but quitting tells
@@ -1973,6 +1976,7 @@ static void raLoad(void) {
 	raHost.poll = raPoll;
 	if (raEngine->init(&raHost) > 0) {
 		raState = 1;
+		raNetLoad();
 	}
 }
 
@@ -1994,6 +1998,9 @@ static void raWriteUnlocks(void) {
 		// card don't verify and are never sent
 		raEngine->sign(r, sizeof(*r), raSigned.mac);
 		fileWrite((char*)&raSigned, &ramDumpFile, RA_DUMP_UNLOCK_OFFSET + (raUnlockSeq % RA_UNLOCK_RECORDS) * sizeof(raSigned), sizeof(raSigned));
+		if (raNet) {
+			raNet->award(r->seq, r->achievementId, 0, 0); // softcore, as RA Sync sends them
+		}
 		raUnlockSeq++;
 	}
 	raPendingCount = 0;
@@ -2018,11 +2025,146 @@ static void raWriteProbe(void) {
 	raSeq++;
 }
 
+// ---------------------------------------------------------------------------
+// In-game sending (ra-nds' ranet.bin, ra_netblob.h): staged by the loader
+// with RA Sync's network profile and TLS session (RA_CFG_NET), loaded with
+// the engine, woken by the first unlock and run in the game's idle time.
+// What it can't send stays in the ring for RA Sync as before; RA answers
+// "already unlocked" to what RA Sync then sends again.
+// ---------------------------------------------------------------------------
+#define RA_NETLOG_MAGIC 0x4C4E4152 // 'RANL': { magic, length, text }
+static struct RaNetHost raNetHost;
+static struct RaNetConfig raNetConfig;
+static bool raNetLogDirty = false;
+
+// 33.5 MHz / 64 from the frame count and scanline: the game owns the
+// timers.  raFrame counts at VBlank (line 192), so the line counts from
+// there too, else the time would step back once a frame.
+static u32 raNetTicks(void) {
+	u32 frame, line;
+	do {
+		frame = raFrame;
+		line = REG_VCOUNT;
+	} while (frame != raFrame);
+	const u32 sinceVBlank = (line >= 192) ? line - 192 : line + 263 - 192;
+	return frame * 8753 + sinceVBlank * 33;
+}
+
+static u32 raNetEntropy(void) {
+	return REG_VCOUNT ^ (raFrame << 9) ^ TIMER_DATA(0) ^ (TIMER_DATA(1) << 16) ^ REG_KEYINPUT;
+}
+
+static u8 raNetI2cRead(u8 dev, u8 reg) {
+	const int oldIME = enterCriticalSection();
+	const u8 value = i2cReadRegister(dev, reg);
+	leaveCriticalSection(oldIME);
+	return value;
+}
+
+static int raNetI2cWrite(u8 dev, u8 reg, u8 data) {
+	const int oldIME = enterCriticalSection();
+	i2cWriteRegister(dev, reg, data);
+	leaveCriticalSection(oldIME);
+	return 1;
+}
+
+// Firmware flash (the WiFi settings), at most a slot at a time; interrupts
+// off so the game's own SPI use (touch screen) can't cut in
+static int raNetNvramRead(void* dst, u32 addr, u32 len) {
+	u8* out = (u8*)dst;
+	const int oldIME = enterCriticalSection();
+	while (REG_SPICNT & SPI_BUSY);
+	REG_SPICNT = SPI_ENABLE | SPI_BYTE_MODE | SPI_CONTINUOUS | SPI_DEVICE_NVRAM;
+	const u8 cmd[4] = {0x03, addr >> 16, addr >> 8, addr}; // READ
+	for (int i = 0; i < 4; i++) {
+		REG_SPIDATA = cmd[i];
+		while (REG_SPICNT & SPI_BUSY);
+	}
+	for (u32 i = 0; i < len; i++) {
+		REG_SPIDATA = 0;
+		while (REG_SPICNT & SPI_BUSY);
+		out[i] = REG_SPIDATA;
+	}
+	REG_SPICNT = 0;
+	leaveCriticalSection(oldIME);
+	return 1;
+}
+
+// The blob's log: kept here, written to ramDump.bin now and then (VBlank),
+// moved to sd:/_nds/ra/ranet_log.txt by the loader at the next start
+static void raNetLog(const char* text, u32 len) {
+	u32* head = (u32*)RA_NET_LOG_RAM;
+	char* buf = (char*)(head + 2);
+	for (u32 i = 0; i < len && head[1] < RA_NETLOG_SIZE - 8; i++) {
+		buf[head[1]++] = text[i];
+	}
+	raNetLogDirty = true;
+}
+
+// With the engine (raLoad): SD free, saveMutex held
+static void raNetLoad(void) {
+	if (!(raConfig & RA_CFG_NET) || (valueBits & hasVramWifiBinary)) {
+		return; // off, or the game uses DS WiFi
+	}
+	struct RaNetStage* stage = (struct RaNetStage*)RA_NET_STAGE_TEMP;
+	fileRead((char*)stage, &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_STAGE_NET_DATA, sizeof(*stage));
+	if (stage->magic != RA_NET_STAGE_MAGIC || stage->blobSize == 0 || stage->blobSize > RA_NET_BLOB_MAX) {
+		return;
+	}
+	fileRead((char*)RA_NET_BLOB_ADDRESS, &ramDumpFile, RA_DUMP_BOOT_OFFSET + RA_STAGE_NET_BLOB, stage->blobSize);
+	const struct RaNetHeader* h = (const struct RaNetHeader*)RA_NET_BLOB_ADDRESS;
+	u32* log = (u32*)RA_NET_LOG_RAM;
+	log[0] = RA_NETLOG_MAGIC;
+	log[1] = 0;
+	if (h->magic == RA_NET_BLOB_MAGIC && h->version == RA_NET_BLOB_VERSION
+	 && h->imageEnd - RA_NET_BLOB_ADDRESS == stage->blobSize && h->bssEnd <= RA_NET_LOG_RAM) {
+		raNetHost.size = sizeof(raNetHost);
+		raNetHost.ticks = raNetTicks;
+		raNetHost.entropy = raNetEntropy;
+		raNetHost.i2cRead = raNetI2cRead;
+		raNetHost.i2cWrite = raNetI2cWrite;
+		raNetHost.nvramRead = raNetNvramRead;
+		raNetHost.log = raNetLog;
+		raNetConfig.size = sizeof(raNetConfig);
+		raNetConfig.profile = &stage->profile;
+		raNetConfig.tls = &stage->tls;
+		tonccpy(raNetConfig.user, stage->user, sizeof(raNetConfig.user));
+		tonccpy(raNetConfig.token, stage->token, sizeof(raNetConfig.token));
+		tonccpy(raNetConfig.md5, raEngine->md5, 32);
+		raNetConfig.md5[32] = 0;
+		if (h->init(&raNetHost, &raNetConfig)) {
+			raNet = h;
+			raNetLog("[ce] ranet loaded\n", 18);
+		} else {
+			raNetLog("[ce] ranet init failed\n", 23);
+		}
+	}
+	// The blob keeps its own copy: no token or session secret left here
+	toncset(stage, 0, sizeof(*stage));
+	toncset(raNetConfig.token, 0, sizeof(raNetConfig.token));
+}
+
+// Game idle time, before the frame evaluation (raIdle).  Never re-entered:
+// an interrupt during the poll may switch to another of the game's ARM7
+// threads (the SDK's), which then halts and gets here again.
+static void raNetIdle(void) {
+	static bool raNetBusy = false;
+	if (!raNet || raNetBusy || raInFrame || sharedAddr[3] != 0) {
+		return;
+	}
+	raNetBusy = true;
+	raNet->poll();
+	u32 seq, result;
+	while (raNet->result(&seq, &result)) {} // the blob logs them
+	raNetBusy = false;
+}
+
 static int raComboFrames = 0;
 
 // Game idle time (SWI Halt hook): one evaluation per VBlank at most, and
 // none while ARM9 waits for a ROM read
 static void raIdle(void) {
+	raNetIdle();
 	if (raInFrame || raState != 1 || raFramesDue == 0 || sharedAddr[3] != 0) {
 		return;
 	}
@@ -2080,7 +2222,8 @@ static void raVBlank(void) {
 
 	// Diagnostics only while the engine runs, not for every game
 	const bool probeDue = (raState == 1 && raFrame % 60 == 0);
-	if (!driveInited || readOngoing || !(raState == 0 || raPendingCount > 0 || probeDue)) {
+	const bool netLogDue = (raNetLogDirty && raFrame % 15 == 7);
+	if (!driveInited || readOngoing || !(raState == 0 || raPendingCount > 0 || probeDue || netLogDue)) {
 		return;
 	}
 	if (!(valueBits & bootstrapOnFlashcard) && isSdEjected()) {
@@ -2099,6 +2242,11 @@ static void raVBlank(void) {
 	}
 	if (probeDue) {
 		raWriteProbe();
+	}
+	if (netLogDue) {
+		raNetLogDirty = false;
+		const u32 len = ((u32*)RA_NET_LOG_RAM)[1];
+		fileWrite((char*)RA_NET_LOG_RAM, &ramDumpFile, RA_DUMP_NETLOG_OFFSET, (8 + len + 3) & ~3);
 	}
 	sdmmc_set_ndma_slot(0);
 	unlockMutex(&saveMutex);

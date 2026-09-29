@@ -11,6 +11,7 @@
 #include <algorithm>
 
 #include <sys/stat.h>
+#include <time.h>
 #include "myDSiMode.h"
 #include "configuration.h"
 #include "ra_engine.h"
@@ -248,6 +249,9 @@ static u32 readConfig(void) {
 			config = (config & ~(0xFFu << RA_CFG_INTERVAL_SHIFT)) | (n << RA_CFG_INTERVAL_SHIFT);
 		} else if (strcmp(line, "hardcore") == 0) {
 			config = (strcmp(value, "1") == 0) ? (config | RA_CFG_HARDCORE) : (config & ~RA_CFG_HARDCORE);
+		} else if (strcmp(line, "realtime") == 0) {
+			// In-game sending: wanted here, kept only if it could be staged
+			config = (strcmp(value, "0") == 0) ? (config & ~RA_CFG_NET) : (config | RA_CFG_NET);
 		}
 	}
 	if (f) {
@@ -308,6 +312,94 @@ static void writeStatus(const configuration* conf, bool keyed, bool haveSet, boo
 	fclose(f);
 }
 
+// The last game's in-game network log (the card engine keeps it at
+// RA_DUMP_NETLOG_OFFSET: 'RANL', length, text) goes to ranet_log.txt
+#define RA_NETLOG_MAGIC 0x4C4E4152 // 'RANL'
+static void flushNetLog(FILE* dump) {
+	u32 head[2] = {0, 0};
+	if (fseek(dump, RA_DUMP_NETLOG_OFFSET, SEEK_SET) != 0 || fread(head, sizeof(head), 1, dump) != 1
+	 || head[0] != RA_NETLOG_MAGIC || head[1] == 0 || head[1] > RA_NETLOG_SIZE - sizeof(head)) {
+		return;
+	}
+	std::vector<char> text(head[1]);
+	if (fread(text.data(), 1, text.size(), dump) == text.size()) {
+		FILE* f = fopen(RA_DIR "/ranet_log.txt", "ab");
+		if (f) {
+			fprintf(f, "--- %s\n", "game");
+			fwrite(text.data(), 1, text.size(), f);
+			fclose(f);
+		}
+	}
+	head[0] = 0;
+	fseek(dump, RA_DUMP_NETLOG_OFFSET, SEEK_SET);
+	fwrite(head, sizeof(head), 1, dump);
+}
+
+// In-game sending (ra_engine.h RaNetStage): ra-nds' ranet.bin with what it
+// needs, staged after the fast-RAM parts: RA Sync's network profile and TLS
+// session, and the account.  Returns why not, or NULL when staged.
+static const char* stageNet(FILE* dump) {
+	std::vector<u8> blob;
+	if (!readFile(RA_DIR "/ranet.bin", blob, RA_NET_BLOB_MAX)) {
+		return "no ranet.bin";
+	}
+	const struct RaNetHeader* h = (const struct RaNetHeader*)blob.data();
+	if (blob.size() < sizeof(*h) || h->magic != RA_NET_BLOB_MAGIC || h->version != RA_NET_BLOB_VERSION
+	 || h->imageEnd - RA_NET_BLOB_ADDRESS != blob.size() || h->bssEnd > RA_NET_LOG_RAM) {
+		return "ranet.bin doesn't match this nds-bootstrap";
+	}
+
+	static struct RaNetStage stage;
+	memset(&stage, 0, sizeof(stage));
+	stage.magic = RA_NET_STAGE_MAGIC;
+	stage.blobSize = blob.size();
+	std::vector<u8> file;
+	if (!readFile(RA_DIR "/net.bin", file, sizeof(stage.profile)) || file.size() != sizeof(stage.profile)) {
+		return "no net.bin (RA Tool or RA Sync makes it)";
+	}
+	memcpy(&stage.profile, file.data(), sizeof(stage.profile));
+	if (!readFile(RA_DIR "/tls.bin", file, sizeof(stage.tls)) || file.size() != sizeof(stage.tls)) {
+		return "no tls.bin (RA Tool or RA Sync makes it)";
+	}
+	memcpy(&stage.tls, file.data(), sizeof(stage.tls));
+	if (stage.profile.magic != RA_NET_PROFILE_MAGIC || stage.tls.magic != RA_TLS_SESSION_MAGIC) {
+		return "net.bin or tls.bin from another version";
+	}
+	// An expired session can't be resumed (the ARM7 can't do a full
+	// handshake): leave the unlocks to RA Sync
+	const time_t now = time(NULL);
+	if (stage.tls.saved && now > (time_t)stage.tls.saved
+	 && (u32)(now - stage.tls.saved) + 600 > stage.tls.ticket_lifetime) {
+		return "TLS session too old (RA Sync renews it)";
+	}
+
+	FILE* f = fopen(RA_DIR "/account.txt", "rb");
+	char line[160];
+	while (f && fgets(line, sizeof(line), f)) {
+		line[strcspn(line, "\r\n")] = 0;
+		if (strncmp(line, "user=", 5) == 0) {
+			strncpy(stage.user, line + 5, sizeof(stage.user) - 1);
+		} else if (strncmp(line, "token=", 6) == 0) {
+			strncpy(stage.token, line + 6, sizeof(stage.token) - 1);
+		}
+	}
+	if (f) {
+		fclose(f);
+	}
+	memset(line, 0, sizeof(line));
+	if (!stage.user[0] || !stage.token[0]) {
+		memset(&stage, 0, sizeof(stage));
+		return "no user or token in account.txt";
+	}
+
+	fseek(dump, RA_DUMP_BOOT_OFFSET + RA_STAGE_NET_BLOB, SEEK_SET);
+	bool ok = fwrite(blob.data(), 1, blob.size(), dump) == blob.size();
+	fseek(dump, RA_DUMP_BOOT_OFFSET + RA_STAGE_NET_DATA, SEEK_SET);
+	ok = fwrite(&stage, 1, sizeof(stage), dump) == sizeof(stage) && ok;
+	memset(&stage, 0, sizeof(stage));
+	return ok ? NULL : "can't write ramDump.bin";
+}
+
 void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 	if (!dsiFeatures() || conf->b4dsMode || conf->bootstrapOnFlashcard || conf->gameOnFlashcard) {
 		return;
@@ -324,6 +416,7 @@ void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 		memcpy(boot->cid, raCid, sizeof(boot->cid)); // the engine derives the key from it
 	}
 	boot->unlockSeq = flushUnlocks(dump);
+	flushNetLog(dump);
 
 	// sd:/_nds/ra/sets/<ROM file name>.txt, written and signed by RA Prep
 	const char* name = strrchr(conf->ndsPath, '/');
@@ -364,6 +457,17 @@ void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 		fwrite(engine.data(), 1, engine.size(), dump);
 		fseek(dump, RA_DUMP_BOOT_OFFSET + RA_SET_OFFSET, SEEK_SET);
 		fwrite(set.data(), 1, set.size(), dump);
+
+		// In-game sending, if wanted and everything is there
+		const char* why = (boot->config & RA_CFG_NET) ? stageNet(dump) : "off in config.txt";
+		if (why) {
+			boot->config &= ~RA_CFG_NET;
+		}
+		FILE* status = fopen(RA_DIR "/loader_status.txt", "ab");
+		if (status) {
+			fprintf(status, "realtime %s\n", why ? why : "staged");
+			fclose(status);
+		}
 	}
 
 	// Always written: a stale header from another game must not load
