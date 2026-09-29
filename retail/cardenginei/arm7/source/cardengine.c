@@ -815,6 +815,10 @@ void forceGameReboot(void) {
 extern bool dldiPatchBinary (unsigned char *binData, u32 binSize);
 #endif
 
+#ifndef TWLSDK
+static bool raQuitThroughSync(void);
+#endif
+
 void returnToLoader(bool reboot) {
 	toncset((u32*)0x02000000, 0, 0x400);
 	*(u32*)0x02000000 = BIT(0) | BIT(1) | BIT(2);
@@ -931,6 +935,9 @@ void returnToLoader(bool reboot) {
 		readSoftResetId(true);
 		waitFrames(5);							// Wait for DSi screens to stabilize
 	} else {
+		if (raQuitThroughSync()) {
+			*(u32*)0x02000000 &= ~BIT(2);	// BIT(2): "back from a game", no autorun
+		}
 		readSoftResetId(true);
 		waitFrames(1);
 	}
@@ -1863,6 +1870,13 @@ static u32 raRecord[16];
 static const u32 raProbeWatch[6] = {0x076a2c, 0x07b3b0, 0x17dd38, 0x17dd1c, 0x17dd20, 0x17dd30};
 static int raState = 0; // 0 = not loaded yet, 1 = running, -1 = off for this game
 static u32 raConfig = 0; // RA_CFG_*, from the boot header
+
+// On a 3DS the loader pointed TWiLight Menu++'s autorun at RA Sync for a
+// game with achievements (ra_boot.cpp raRedirectQuit), but quitting tells
+// TWiLight Menu++ not to autorun: returnToLoader() lifts that for these games
+static bool raQuitThroughSync(void) {
+	return raState == 1;
+}
 
 // Hardcore for this game: inGameMenu.c refuses RAM reads/writes/dumps and
 // refresh-rate changes

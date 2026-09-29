@@ -659,7 +659,9 @@ void raRedirectQuit(configuration* conf) {
 	// Started by RA Prep's restart (after_prep.txt names this ROM): quitting
 	// straight to TWiLight Menu++ then hangs on the game's last frame, while
 	// RA Sync, which returns through Unlaunch, works, so quit through RA Sync
-	// even without a set.  One use.
+	// even without a set.  One use.  (DSi only: on a 3DS both quit to
+	// TWiLight Menu++ the same way, and autorun runs RA Sync only after a
+	// game with achievements, cardengine.c raQuitThroughSync.)
 	bool afterPrep = false;
 	FILE* f = fopen(RA_AFTER_PREP_FILE, "rb");
 	if (f) {
@@ -668,7 +670,7 @@ void raRedirectQuit(configuration* conf) {
 		fclose(f);
 		remove(RA_AFTER_PREP_FILE);
 		rom[strcspn(rom, "\r\n")] = '\0';
-		afterPrep = strcmp(rom, conf->ndsPath) == 0;
+		afterPrep = !on3ds && strcmp(rom, conf->ndsPath) == 0;
 	}
 
 	const char* name = strrchr(conf->ndsPath, '/');
