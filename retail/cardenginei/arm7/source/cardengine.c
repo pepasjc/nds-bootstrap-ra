@@ -2306,19 +2306,37 @@ static bool rtcomRequest(u8 request, u8 param) {
 	return rtcomWait(RTCOM_ACK, 1000000);
 }
 
+// The ARM11's answers raise the SIO interrupt flag, which we poll: a game
+// with that interrupt enabled would take (and clear) it first, and we'd
+// miss answers halfway through an upload, leaving TwlBg stuck waiting for
+// the rest (a hard freeze, HOME menu included: Castlevania DoS).  So it's
+// masked for the length of each exchange.
+static u32 raUcIe;
+
 static void rtcomBegin(void) {
+	const int oldIME = enterCriticalSection();
+	raUcIe = REG_IE & IRQ_NETWORK;
+	REG_IE &= ~IRQ_NETWORK;
+	leaveCriticalSection(oldIME);
 	raUcRcnt = RA_RCNT;
 	REG_IF = IRQ_NETWORK;
-	RA_RCNT = 0x8100; // the ARM11's answers raise the SIO interrupt flag
+	RA_RCNT = 0x8100;
 	REG_IF = IRQ_NETWORK;
 }
 
 static void rtcomEnd(void) {
-	rtcomSetRequest(RTCOM_KILL);
-	rtcomWait(RTCOM_READY, 1000000);
+	// Back to idle, a few tries: after a failed upload TwlBg must not be
+	// left waiting for bytes
+	for (int i = 0; i < 4; i++) {
+		rtcomSetRequest(RTCOM_KILL);
+		if (rtcomWait(RTCOM_READY, 1000000)) break;
+	}
 	rtcomSetRequest(RTCOM_DONE);
 	REG_IF = IRQ_NETWORK;
 	RA_RCNT = raUcRcnt;
+	const int oldIME = enterCriticalSection();
+	REG_IE |= raUcIe;
+	leaveCriticalSection(oldIME);
 }
 
 // Runs a command of our ARM11 program; its answer, or -1
