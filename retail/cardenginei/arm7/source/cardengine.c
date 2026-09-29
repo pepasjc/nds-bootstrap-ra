@@ -2039,6 +2039,7 @@ static bool raNetLogDirty = false;
 #define RA_NET_SENT_QUEUE 8
 static struct RaNetSent raNetSentQueue[RA_NET_SENT_QUEUE];
 static volatile int raNetSentCount = 0;
+static volatile int raNetEnableReq = 0; // in-game menu: 0 nothing, 1 off, 2 on
 
 // 33.5 MHz / 64 from the frame count and scanline: the game owns the
 // timers.  raFrame counts at VBlank (line 192), so the line counts from
@@ -2138,6 +2139,9 @@ static void raNetLoad(void) {
 		if (h->init(&raNetHost, &raNetConfig)) {
 			raNet = h;
 			raNetLog("[ce] ranet loaded\n", 18);
+			if (raConfig & RA_CFG_NET_OFF) {
+				raNet->enable(0); // switched off for this game (in-game menu)
+			}
 		} else {
 			raNetLog("[ce] ranet init failed\n", 23);
 		}
@@ -2156,6 +2160,10 @@ static void raNetIdle(void) {
 		return;
 	}
 	raNetBusy = true;
+	if (raNetEnableReq) {
+		raNet->enable(raNetEnableReq == 2);
+		raNetEnableReq = 0;
+	}
 	raNet->poll();
 	u32 seq, result;
 	while (raNet->result(&seq, &result)) {
@@ -2169,6 +2177,21 @@ static void raNetIdle(void) {
 		leaveCriticalSection(oldIME);
 	}
 	raNetBusy = false;
+}
+
+// In-game menu (RART): real-time upload on/off for this game.  Called with
+// saveMutex held.  The blob is told at the next idle poll (not from here:
+// the menu may have interrupted a poll); the loader remembers the choice
+// for the game (RaRealtimeChoice).
+void raSetRealtime(bool on) {
+	raConfig = on ? (raConfig & ~RA_CFG_NET_OFF) : (raConfig | RA_CFG_NET_OFF);
+	((struct RaBootHeader*)RA_REGION)->config = raConfig;
+	raNetEnableReq = on ? 2 : 1;
+	static struct RaRealtimeChoice choice;
+	choice.magic = RA_REALTIME_MAGIC;
+	choice.on = on;
+	tonccpy(choice.md5, raEngine->md5, sizeof(choice.md5));
+	fileWrite((char*)&choice, &ramDumpFile, RA_DUMP_REALTIME_OFFSET, sizeof(choice));
 }
 
 // VBlank, SD free, saveMutex held

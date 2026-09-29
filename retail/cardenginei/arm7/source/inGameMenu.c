@@ -283,6 +283,12 @@ void inGameMenu(u32 mode) {
 					}
 					break;
 				}
+				case 0x54524152: // RART: RetroAchievements real-time upload off (0) / on (1)
+				{
+					extern void raSetRealtime(bool on);
+					raSetRealtime(sharedAddr[0] != 0);
+					break;
+				}
 				#endif
 				case 0x444D4152: // RAMD
 					dumpRam();

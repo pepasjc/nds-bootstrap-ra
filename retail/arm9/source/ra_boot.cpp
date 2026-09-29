@@ -369,6 +369,56 @@ static void flushNetLog(FILE* dump) {
 	fwrite(head, sizeof(head), 1, dump);
 }
 
+// Real-time upload switched off per game in the in-game menu: the hashes in
+// realtime_off.txt.  The card engine leaves the last switch in ramDump.bin
+// (RaRealtimeChoice); it is applied here at the next start.
+#define RA_REALTIME_OFF RA_DIR "/realtime_off.txt"
+static bool realtimeOffFor(const char* md5) {
+	FILE* f = fopen(RA_REALTIME_OFF, "rb");
+	char line[64];
+	bool found = false;
+	while (f && !found && fgets(line, sizeof(line), f)) {
+		found = strncmp(line, md5, 32) == 0;
+	}
+	if (f) {
+		fclose(f);
+	}
+	return found;
+}
+
+static void applyRealtimeChoice(FILE* dump) {
+	struct RaRealtimeChoice choice;
+	if (fseek(dump, RA_DUMP_REALTIME_OFFSET, SEEK_SET) != 0 || fread(&choice, sizeof(choice), 1, dump) != 1
+	 || choice.magic != RA_REALTIME_MAGIC) {
+		return;
+	}
+	char md5[33];
+	memcpy(md5, choice.md5, 32);
+	md5[32] = 0;
+	if (!choice.on && !realtimeOffFor(md5)) {
+		FILE* f = fopen(RA_REALTIME_OFF, "ab");
+		if (f) {
+			fprintf(f, "%s\n", md5);
+			fclose(f);
+		}
+	} else if (choice.on && realtimeOffFor(md5)) {
+		// Rewrite without it
+		std::vector<std::string> keep;
+		FILE* f = fopen(RA_REALTIME_OFF, "rb");
+		char line[64];
+		while (f && fgets(line, sizeof(line), f)) {
+			if (strncmp(line, md5, 32) != 0) keep.push_back(line);
+		}
+		if (f) fclose(f);
+		f = fopen(RA_REALTIME_OFF, "wb");
+		for (size_t i = 0; f && i < keep.size(); i++) fputs(keep[i].c_str(), f);
+		if (f) fclose(f);
+	}
+	choice.magic = 0;
+	fseek(dump, RA_DUMP_REALTIME_OFFSET, SEEK_SET);
+	fwrite(&choice, sizeof(choice), 1, dump);
+}
+
 // In-game sending (ra_engine.h RaNetStage): ra-nds' ranet.bin with what it
 // needs, staged after the fast-RAM parts: RA Sync's network profile and TLS
 // session, and the account.  Returns why not, or NULL when staged.
@@ -451,6 +501,7 @@ void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 	}
 	boot->unlockSeq = flushUnlocks(dump);
 	flushNetLog(dump);
+	applyRealtimeChoice(dump);
 
 	// sd:/_nds/ra/sets/<ROM file name>.txt, written and signed by RA Prep
 	const char* name = strrchr(conf->ndsPath, '/');
@@ -496,10 +547,13 @@ void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 		const char* why = (boot->config & RA_CFG_NET) ? stageNet(dump) : "off in config.txt";
 		if (why) {
 			boot->config &= ~RA_CFG_NET;
+		} else if (md5 && realtimeOffFor(md5 + 1)) {
+			// Staged all the same, so the in-game menu can switch it back on
+			boot->config |= RA_CFG_NET_OFF;
 		}
 		FILE* status = fopen(RA_DIR "/loader_status.txt", "ab");
 		if (status) {
-			fprintf(status, "realtime %s\n", why ? why : "staged");
+			fprintf(status, "realtime %s\n", why ? why : (boot->config & RA_CFG_NET_OFF) ? "staged, off for this game" : "staged");
 			fclose(status);
 		}
 	}
@@ -715,6 +769,41 @@ static void rebootToTwilight(void) {
 // trying again at once.  A set whose <rom>.id doesn't match the ROM (or has
 // none yet) goes through RA Prep too, which hashes the ROM again and keeps
 // or replaces the set.  Only returns when the game should just start.
+// Real-time upload (ranet.bin) needs RA Sync's WiFi profile (net.bin) and a
+// TLS session it can still resume (tls.bin, 18 hours): renewed by RA Prep
+// when missing or with less than 6 hours left.  Not again within 6 hours of
+// an attempt (net_tried.txt, RA Prep): without WiFi every start would wait.
+#define RA_NET_RENEW_MARGIN (6 * 3600)
+static bool netRefreshWanted(void) {
+	struct stat st;
+	if (!(readConfig() & RA_CFG_NET) || stat(RA_DIR "/ranet.bin", &st) != 0) {
+		return false;
+	}
+	const time_t now = time(NULL);
+	FILE* f = fopen(RA_DIR "/net_tried.txt", "rb");
+	if (f) {
+		unsigned long tried = 0;
+		const bool got = fscanf(f, "%lu", &tried) == 1;
+		fclose(f);
+		if (got && now >= (time_t)tried && now - (time_t)tried < RA_NET_RENEW_MARGIN) {
+			return false;
+		}
+	}
+	if (stat(RA_DIR "/net.bin", &st) != 0) {
+		return true;
+	}
+	RaTlsSession tls;
+	f = fopen(RA_DIR "/tls.bin", "rb");
+	const bool haveTls = f && fread(&tls, sizeof(tls), 1, f) == 1 && tls.magic == RA_TLS_SESSION_MAGIC;
+	if (f) {
+		fclose(f);
+	}
+	if (!haveTls || !tls.saved || now < (time_t)tls.saved) {
+		return !haveTls;
+	}
+	return (u32)(now - tls.saved) + RA_NET_RENEW_MARGIN > tls.ticket_lifetime;
+}
+
 void raRedirectPrep(configuration* conf, const char* bootstrapPath) {
 	// On a 3DS (console model 2 and up) through TWiLight Menu++'s autorun
 	// instead of Unlaunch (see "3DS hand-off" above)
@@ -750,19 +839,25 @@ void raRedirectPrep(configuration* conf, const char* bootstrapPath) {
 	// A set counts only with a good signature (RA Prep signs what it fetches)
 	std::vector<u8> set;
 	const bool setOk = readFile((setPath + ".txt").c_str(), set, RA_SET_MAX - 1) && setSignatureOk(name, set);
-	if ((setOk || stat((setPath + ".none").c_str(), &st) == 0)
-	 && romMatchesId(fingerprint, (setPath + ".id").c_str())) {
+	// A game with achievements also goes through RA Prep when real-time
+	// upload needs its WiFi profile or TLS session renewed
+	const bool netRefresh = setOk && netRefreshWanted();
+	const bool romOk = (setOk || stat((setPath + ".none").c_str(), &st) == 0)
+	 && romMatchesId(fingerprint, (setPath + ".id").c_str());
+	if (romOk && !netRefresh) {
 		return;
 	}
 
-	// ROM, loader to start again, fingerprint for <rom>.id, "3ds" on a 3DS
+	// ROM, loader to start again, fingerprint for <rom>.id, "3ds" on a 3DS,
+	// "net" when RA Prep should renew net.bin and tls.bin, "romok" when the
+	// ROM and its set need no checking (then RA Prep doesn't hash it)
 	f = fopen(RA_PREP_FILE, "wb");
 	if (!f) {
 		return;
 	}
-	fprintf(f, "%s\n%s\n%s\n%s\n", conf->ndsPath,
+	fprintf(f, "%s\n%s\n%s\n%s\n%s\n%s\n", conf->ndsPath,
 		strncmp(bootstrapPath, "sd:/", 4) == 0 ? bootstrapPath : "sd:/_nds/nds-bootstrap-nightly.nds",
-		fingerprint, on3ds ? "3ds" : "");
+		fingerprint, on3ds ? "3ds" : "", netRefresh ? "net" : "", romOk ? "romok" : "");
 	fclose(f);
 
 	if (on3ds) {

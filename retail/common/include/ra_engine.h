@@ -68,6 +68,11 @@
 // { RA_MODE_MAGIC, 0 or 1 }.  Overrides config.txt "hardcore".
 #define RA_DUMP_MODE_OFFSET   0x01FD0000
 #define RA_MODE_MAGIC         0x4F4D4152 // 'RAMO'
+// Real-time upload switched in the in-game menu, for the loader to
+// remember per game (sd:/_nds/ra/realtime_off.txt, by hash): struct
+// RaRealtimeChoice
+#define RA_DUMP_REALTIME_OFFSET (RA_DUMP_MODE_OFFSET + 0x10)
+#define RA_REALTIME_MAGIC     0x54524152 // 'RART'
 #define RA_DUMP_UNLOCK_OFFSET 0x01FE0000
 #define RA_DUMP_PROBE_OFFSET  0x01FF0000
 #define RA_UNLOCK_RECORDS     512 // struct RaSignedUnlock, 96 bytes each
@@ -96,6 +101,7 @@
 #define RA_HARDCORE_AVAILABLE 0
 #define RA_CFG_HARDCORE       (1 << 3)   // no cheats, RAM viewer/editor or refresh-rate change
 #define RA_CFG_NET            (1 << 4)   // in-game sending staged (RaNetStage)
+#define RA_CFG_NET_OFF        (1 << 5)   // ...but switched off (in-game menu)
 #define RA_CFG_INTERVAL_SHIFT 8          // evaluate every Nth frame (0/1: all)
 #define RA_CFG_DEFAULT        (RA_CFG_WRAM | RA_CFG_NET)
 
@@ -207,6 +213,12 @@ struct RaNetStage {
 	char token[RA_NET_TOKEN_MAX];
 	RaNetProfile profile;
 	RaTlsSession tls;
+};
+
+struct RaRealtimeChoice {
+	u32 magic;    // RA_REALTIME_MAGIC
+	u32 on;
+	char md5[32]; // the game's hash
 };
 
 // What the in-game network stack did with an unlock (RA_DUMP_SENT_OFFSET,

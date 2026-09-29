@@ -518,6 +518,36 @@ static const unsigned char raModeDescription[] =
 static const unsigned char raHardcoreQuestion[] =
 	"Hardcore turns off cheats, the RAM viewer and refresh rate changes. The game restarts now. Continue?";
 
+// Real-time upload (ra-nds' ranet.bin): staged for this game, and whether
+// it is on (the loader stages it off for games switched off here before)
+static bool raRealtimeStaged(void) {
+	const struct RaBootHeader *boot = (const struct RaBootHeader *)RA_REGION;
+	DC_InvalidateRange((const void *)RA_REGION, 32);
+	return boot->magic == RA_BOOT_MAGIC && (boot->config & RA_CFG_NET);
+}
+
+static bool raRealtimeOn(void) {
+	const struct RaBootHeader *boot = (const struct RaBootHeader *)RA_REGION;
+	DC_InvalidateRange((const void *)RA_REGION, 32);
+	return !(boot->config & RA_CFG_NET_OFF);
+}
+
+static const unsigned char raRealtimeLabel[] = "Real-time upload";
+static const unsigned char raRealtimeDescription[] =
+	"Sends achievements to RetroAchievements while you play (WiFi stays on). Off: sent when you quit. Kept for this game.";
+static const unsigned char raOnText[] = "On";
+static const unsigned char raOffText[] = "Off";
+
+// Tell the card engine (RART) and wait for it
+static void raSendRealtime(u32 on) {
+	sharedAddr[0] = on;
+	sharedAddr[4] = 0x54524152; // RART
+	while (sharedAddr[4] == 0x54524152) {
+		while (REG_VCOUNT != 191) mySwiDelay(100);
+		while (REG_VCOUNT == 191) mySwiDelay(100);
+	}
+}
+
 // Tell the card engine (RAHC) and wait for it
 static void raSendMode(u32 hardcore) {
 	sharedAddr[0] = hardcore;
@@ -546,6 +576,8 @@ static int buildOptions(OptionsItem *optionsItems, u32 consoleModel, bool ra) {
 	optionsItems[optionsItemCount++] = OPTIONS_VRAM_MODE;
 	if (RA_HARDCORE_AVAILABLE && ra && raAvailable()) // hardcore not yet: ra_engine.h
 		optionsItems[optionsItemCount++] = OPTIONS_RA_MODE;
+	if (ra && raRealtimeStaged())
+		optionsItems[optionsItemCount++] = OPTIONS_RA_REALTIME;
 	#endif
 	return optionsItemCount;
 }
@@ -553,6 +585,7 @@ static int buildOptions(OptionsItem *optionsItems, u32 consoleModel, bool ra) {
 static const unsigned char *optionLabel(OptionsItem item) {
 	#ifndef B4DS
 	if (item == OPTIONS_RA_MODE) return raModeLabel;
+	if (item == OPTIONS_RA_REALTIME) return raRealtimeLabel;
 	#endif
 	return igmText.optionsLabels[item];
 }
@@ -560,6 +593,7 @@ static const unsigned char *optionLabel(OptionsItem item) {
 static const unsigned char *optionDescription(OptionsItem item, u32 consoleModel) {
 	#ifndef B4DS
 	if (item == OPTIONS_RA_MODE) return raModeDescription;
+	if (item == OPTIONS_RA_REALTIME) return raRealtimeDescription;
 	#endif
 	OptionsItem full[8];
 	const int count = buildOptions(full, consoleModel, false);
@@ -608,6 +642,9 @@ static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
 					break;
 				case OPTIONS_RA_MODE:
 					optionValue = raHardcore() ? raHardcoreText : raSoftcoreText;
+					break;
+				case OPTIONS_RA_REALTIME:
+					optionValue = raRealtimeOn() ? raOnText : raOffText;
 					break;
 				#endif
 			}
@@ -689,6 +726,9 @@ static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
 					}
 					break;
 				}
+				case OPTIONS_RA_REALTIME:
+					raSendRealtime(!raRealtimeOn());
+					break;
 				case OPTIONS_RA_MODE:
 					if (raHardcore()) {
 						// Leaving hardcore: at once; the refresh rate comes back
