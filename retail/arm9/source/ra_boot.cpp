@@ -283,6 +283,8 @@ static u32 readConfig(void) {
 			config = (config & ~(0xFFu << RA_CFG_INTERVAL_SHIFT)) | (n << RA_CFG_INTERVAL_SHIFT);
 		} else if (strcmp(line, "hardcore") == 0) {
 			config = (strcmp(value, "1") == 0) ? (config | RA_CFG_HARDCORE) : (config & ~RA_CFG_HARDCORE);
+		} else if (strcmp(line, "log") == 0) {
+			config = (strcmp(value, "0") == 0) ? (config & ~RA_CFG_NETLOG) : (config | RA_CFG_NETLOG);
 		} else if (strcmp(line, "realtime") == 0) {
 			// In-game sending: wanted here, kept only if it could be staged
 			config = (strcmp(value, "0") == 0) ? (config & ~RA_CFG_NET) : (config | RA_CFG_NET);
@@ -419,6 +421,31 @@ static void applyRealtimeChoice(FILE* dump) {
 	fwrite(&choice, sizeof(choice), 1, dump);
 }
 
+// The network log switched in the in-game menu (RA_DUMP_LOGCHOICE_OFFSET):
+// written to config.txt as "log=0/1", replacing any "log" line
+static void applyLogChoice(FILE* dump) {
+	u32 choice[2] = {0, 0};
+	if (fseek(dump, RA_DUMP_LOGCHOICE_OFFSET, SEEK_SET) != 0 || fread(choice, sizeof(choice), 1, dump) != 1
+	 || choice[0] != RA_LOG_MAGIC) {
+		return;
+	}
+	std::vector<std::string> lines;
+	FILE* f = fopen(RA_DIR "/config.txt", "rb");
+	char line[160];
+	while (f && fgets(line, sizeof(line), f)) {
+		if (strncmp(line, "log=", 4) != 0) lines.push_back(line);
+	}
+	if (f) fclose(f);
+	if (!lines.empty() && lines.back().back() != '\n') lines.back() += "\n";
+	lines.push_back(choice[1] ? "log=1\n" : "log=0\n");
+	f = fopen(RA_DIR "/config.txt", "wb");
+	for (size_t i = 0; f && i < lines.size(); i++) fputs(lines[i].c_str(), f);
+	if (f) fclose(f);
+	choice[0] = 0;
+	fseek(dump, RA_DUMP_LOGCHOICE_OFFSET, SEEK_SET);
+	fwrite(choice, sizeof(choice), 1, dump);
+}
+
 // In-game sending (ra_engine.h RaNetStage): ra-nds' ranet.bin with what it
 // needs, staged after the fast-RAM parts: RA Sync's network profile and TLS
 // session, and the account.  Returns why not, or NULL when staged.
@@ -502,6 +529,7 @@ void raPrepareBoot(const configuration* conf, const std::string& ramDumpPath) {
 	boot->unlockSeq = flushUnlocks(dump);
 	flushNetLog(dump);
 	applyRealtimeChoice(dump);
+	applyLogChoice(dump);
 
 	// sd:/_nds/ra/sets/<ROM file name>.txt, written and signed by RA Prep
 	const char* name = strrchr(conf->ndsPath, '/');

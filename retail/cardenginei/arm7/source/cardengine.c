@@ -2099,6 +2099,9 @@ static int raNetNvramRead(void* dst, u32 addr, u32 len) {
 // The blob's log: kept here, written to ramDump.bin now and then (VBlank),
 // moved to sd:/_nds/ra/ranet_log.txt by the loader at the next start
 static void raNetLog(const char* text, u32 len) {
+	if (!(raConfig & RA_CFG_NETLOG)) {
+		return; // switched off (config.txt "log=0", in-game menu)
+	}
 	u32* head = (u32*)RA_NET_LOG_RAM;
 	char* buf = (char*)(head + 2);
 	for (u32 i = 0; i < len && head[1] < RA_NETLOG_SIZE - 8; i++) {
@@ -2210,6 +2213,17 @@ void raSetRealtime(bool on) {
 	choice.on = on;
 	tonccpy(choice.md5, raEngine->md5, sizeof(choice.md5));
 	fileWrite((char*)&choice, &ramDumpFile, RA_DUMP_REALTIME_OFFSET, sizeof(choice));
+}
+
+// In-game menu (RALG): the network log on/off, for every game (the loader
+// writes it to config.txt).  saveMutex held.
+void raSetLog(bool on) {
+	raConfig = on ? (raConfig | RA_CFG_NETLOG) : (raConfig & ~RA_CFG_NETLOG);
+	((struct RaBootHeader*)RA_REGION)->config = raConfig;
+	static u32 choice[2];
+	choice[0] = RA_LOG_MAGIC;
+	choice[1] = on;
+	fileWrite((char*)choice, &ramDumpFile, RA_DUMP_LOGCHOICE_OFFSET, sizeof(choice));
 }
 
 // VBlank, SD free, saveMutex held

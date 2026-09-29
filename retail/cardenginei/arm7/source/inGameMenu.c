@@ -289,6 +289,12 @@ void inGameMenu(u32 mode) {
 					raSetRealtime(sharedAddr[0] != 0);
 					break;
 				}
+				case 0x474C4152: // RALG: RetroAchievements network log off (0) / on (1)
+				{
+					extern void raSetLog(bool on);
+					raSetLog(sharedAddr[0] != 0);
+					break;
+				}
 				#endif
 				case 0x444D4152: // RAMD
 					dumpRam();

@@ -24,7 +24,8 @@ typedef enum {
 	OPTIONS_CLOCK_SPEED,
 	OPTIONS_VRAM_MODE,
 	OPTIONS_RA_MODE, // RetroAchievements softcore/hardcore; own label (not in igmText)
-	OPTIONS_RA_REALTIME // RetroAchievements real-time upload on/off; own label
+	OPTIONS_RA_REALTIME, // RetroAchievements real-time upload on/off; own label
+	OPTIONS_RA_LOG // RetroAchievements network log on/off; own label
 	#endif
 } OptionsItem;
 

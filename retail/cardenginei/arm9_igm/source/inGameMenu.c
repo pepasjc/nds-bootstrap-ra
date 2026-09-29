@@ -535,6 +535,26 @@ static bool raRealtimeOn(void) {
 static const unsigned char raRealtimeLabel[] = "Real-time upload";
 static const unsigned char raRealtimeDescription[] =
 	"Sends achievements to RetroAchievements while you play (WiFi stays on). Off: sent when you quit. Kept for this game.";
+static const unsigned char raLogLabel[] = "Network log";
+static const unsigned char raLogDescription[] =
+	"Keeps what real-time upload does in sd:/_nds/ra/ranet_log.txt, for finding problems. Kept for all games.";
+
+static bool raLogOn(void) {
+	const struct RaBootHeader *boot = (const struct RaBootHeader *)RA_REGION;
+	DC_InvalidateRange((const void *)RA_REGION, 32);
+	return (boot->config & RA_CFG_NETLOG) != 0;
+}
+
+// Tell the card engine (RALG) and wait for it
+static void raSendLog(u32 on) {
+	sharedAddr[0] = on;
+	sharedAddr[4] = 0x474C4152; // RALG
+	while (sharedAddr[4] == 0x474C4152) {
+		while (REG_VCOUNT != 191) mySwiDelay(100);
+		while (REG_VCOUNT == 191) mySwiDelay(100);
+	}
+}
+
 static const unsigned char raOnText[] = "On";
 static const unsigned char raOffText[] = "Off";
 
@@ -576,8 +596,10 @@ static int buildOptions(OptionsItem *optionsItems, u32 consoleModel, bool ra) {
 	optionsItems[optionsItemCount++] = OPTIONS_VRAM_MODE;
 	if (RA_HARDCORE_AVAILABLE && ra && raAvailable()) // hardcore not yet: ra_engine.h
 		optionsItems[optionsItemCount++] = OPTIONS_RA_MODE;
-	if (ra && raRealtimeStaged())
+	if (ra && raRealtimeStaged()) {
 		optionsItems[optionsItemCount++] = OPTIONS_RA_REALTIME;
+		optionsItems[optionsItemCount++] = OPTIONS_RA_LOG;
+	}
 	#endif
 	return optionsItemCount;
 }
@@ -586,6 +608,7 @@ static const unsigned char *optionLabel(OptionsItem item) {
 	#ifndef B4DS
 	if (item == OPTIONS_RA_MODE) return raModeLabel;
 	if (item == OPTIONS_RA_REALTIME) return raRealtimeLabel;
+	if (item == OPTIONS_RA_LOG) return raLogLabel;
 	#endif
 	return igmText.optionsLabels[item];
 }
@@ -594,8 +617,9 @@ static const unsigned char *optionDescription(OptionsItem item, u32 consoleModel
 	#ifndef B4DS
 	if (item == OPTIONS_RA_MODE) return raModeDescription;
 	if (item == OPTIONS_RA_REALTIME) return raRealtimeDescription;
+	if (item == OPTIONS_RA_LOG) return raLogDescription;
 	#endif
-	OptionsItem full[8];
+	OptionsItem full[10];
 	const int count = buildOptions(full, consoleModel, false);
 	for (int i = 0; i < count; i++) {
 		if (full[i] == item) return igmText.optionsDescriptions[i];
@@ -604,7 +628,7 @@ static const unsigned char *optionDescription(OptionsItem item, u32 consoleModel
 }
 
 static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
-	OptionsItem optionsItems[8];
+	OptionsItem optionsItems[10];
 	int optionsItemCount = buildOptions(optionsItems, consoleModel, true);
 
 	bool mainScreenChanged = false;
@@ -645,6 +669,9 @@ static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
 					break;
 				case OPTIONS_RA_REALTIME:
 					optionValue = raRealtimeOn() ? raOnText : raOffText;
+					break;
+				case OPTIONS_RA_LOG:
+					optionValue = raLogOn() ? raOnText : raOffText;
 					break;
 				#endif
 			}
@@ -728,6 +755,9 @@ static void optionsMenu(s32 *mainScreen, u32 consoleModel) {
 				}
 				case OPTIONS_RA_REALTIME:
 					raSendRealtime(!raRealtimeOn());
+					break;
+				case OPTIONS_RA_LOG:
+					raSendLog(!raLogOn());
 					break;
 				case OPTIONS_RA_MODE:
 					if (raHardcore()) {
