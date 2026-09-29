@@ -2451,7 +2451,7 @@ static void raVBlank(void) {
 
 	// Diagnostics only while the engine runs, not for every game
 	const bool probeDue = (raState == 1 && raFrame % 60 == 0);
-	const bool netLogDue = (raNetLogDirty && raFrame % 15 == 7);
+	const bool netLogDue = (raNetLogDirty && raFrame % 60 == 37); // at most once a second
 	if (!driveInited || readOngoing || !(raState == 0 || raPendingCount > 0 || probeDue || netLogDue || raNetSentCount > 0)) {
 		return;
 	}
