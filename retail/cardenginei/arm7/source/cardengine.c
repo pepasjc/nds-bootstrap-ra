@@ -1873,6 +1873,7 @@ static int raState = 0; // 0 = not loaded yet, 1 = running, -1 = off for this ga
 static u32 raConfig = 0; // RA_CFG_*, from the boot header
 static const struct RaNetHeader* raNet; // in-game sending, below
 static void raNetLoad(void);
+static bool raLedPending; // 3DS LED, below
 
 // On a 3DS the loader pointed TWiLight Menu++'s autorun at RA Sync for a
 // game with achievements (ra_boot.cpp raRedirectQuit), but quitting tells
@@ -1934,6 +1935,7 @@ static void raUnlocked(u32 achievementId, u32 points, const char* title) {
 		raPendingCount++;
 	}
 	raQueuePopup(title, points);
+	raLedPending = true; // 3DS: the notification LED too
 	leaveCriticalSection(oldIME);
 }
 
@@ -2136,6 +2138,7 @@ static void raNetLoad(void) {
 		tonccpy(raNetConfig.token, stage->token, sizeof(raNetConfig.token));
 		tonccpy(raNetConfig.md5, raEngine->md5, 32);
 		raNetConfig.md5[32] = 0;
+		raNetConfig.gameId = raEngine->gameId;
 		if (h->init(&raNetHost, &raNetConfig)) {
 			raNet = h;
 			raNetLog("[ce] ranet loaded\n", 18);
@@ -2165,6 +2168,21 @@ static void raNetIdle(void) {
 		raNetEnableReq = 0;
 	}
 	raNet->poll();
+	// The account's unlocks, once connected: earned on another console,
+	// they are done here too (no popup again; the engine only raises
+	// locked ones).  Same idle context as the engine's frames.
+	const u32* ids;
+	u32 idCount;
+	if (raNet->accountUnlocks(&ids, &idCount)) {
+		struct RaAchievement* list = raEngine->achievements;
+		for (u32 i = 0; i < raEngine->count; i++) {
+			for (u32 j = 0; j < idCount && list[i].status == RA_LOCKED; j++) {
+				if (list[i].id == ids[j]) {
+					list[i].status = RA_UNLOCKED_BEFORE;
+				}
+			}
+		}
+	}
 	u32 seq, result;
 	while (raNet->result(&seq, &result)) {
 		// Sent ones are written to ramDump.bin (VBlank) for RA Sync to skip
@@ -2204,12 +2222,178 @@ static void raNetWriteSent(void) {
 	raNetSentCount = 0;
 }
 
+// ---------------------------------------------------------------------------
+// 3DS: the notification LED on unlocks, through TWPatch's TwlBg.  RTCom:
+// the ARM7 and TwlBg's ARM11 talk through two RTC registers, the ARM11
+// answering with the SIO interrupt flag.  Our ARM11 program (arm11_ra,
+// ra_uc11.h) is uploaded once, 3 s into the game, unless TwlBg still has
+// it from the last game; a TwlBg without RTCom doesn't answer the first
+// ping and nothing more is tried.
+// ---------------------------------------------------------------------------
+#include "ra_ucode.h"
+#include "ra_uc11.h"
+#define RA_RTC_CR      (*(vu8*)0x04000138)
+#define RA_RCNT        (*(vu16*)0x04000134)
+#define RTCOM_READY    0x00
+#define RTCOM_ACK      0x80
+#define RTCOM_DONE     0x82
+#define RTCOM_UPLOAD   0x41
+#define RTCOM_FINISH   0x42
+#define RTCOM_EXECUTE  0x44
+#define RTCOM_NEXT     0x81
+#define RTCOM_KILL     0xFE
+static int raUcState = 0; // 0 not tried, 1 ready, -1 unavailable
+static bool raLedPending = false;
+static u16 raUcRcnt;
+
+static void rtcomDelay(int n) {
+	for (vu32 i = n; i; i--);
+}
+
+// One RTC transfer, bits high first: the command byte, then a byte out
+// (out >= 0) or in (returned)
+static int rtcomXfer(u8 cmd, int out) {
+	const int oldIME = enterCriticalSection();
+	RA_RTC_CR = (1<<6) | (1<<5)|(1<<1) | (1<<4)|1;          // CS low, SCK high
+	rtcomDelay(2);
+	RA_RTC_CR = (1<<6)|(1<<2) | (1<<5)|(1<<1) | (1<<4)|1;   // CS high
+	rtcomDelay(2);
+	u32 bits = (out >= 0) ? ((u32)cmd << 8 | (u8)out) : cmd;
+	const int n = (out >= 0) ? 16 : 8;
+	for (int b = n - 1; b >= 0; b--) {
+		const u8 sio = (1<<4) | ((bits >> b) & 1);
+		RA_RTC_CR = (1<<6)|(1<<2) | (1<<5) | sio;            // SCK low
+		rtcomDelay(9);
+		RA_RTC_CR = (1<<6)|(1<<2) | (1<<5)|(1<<1) | sio;     // SCK high
+		rtcomDelay(9);
+	}
+	int in = 0;
+	if (out < 0) {
+		for (int b = 0; b < 8; b++) {
+			RA_RTC_CR = (1<<6)|(1<<2) | (1<<5);
+			rtcomDelay(9);
+			RA_RTC_CR = (1<<6)|(1<<2) | (1<<5)|(1<<1);
+			rtcomDelay(9);
+			in = (in << 1) | (RA_RTC_CR & 1);
+		}
+	}
+	rtcomDelay(2);
+	RA_RTC_CR = (1<<6) | (1<<5)|(1<<1);                      // CS low
+	rtcomDelay(2);
+	leaveCriticalSection(oldIME);
+	return in;
+}
+
+#define rtcomData()        rtcomXfer(0x6D, -1)       // register "112"
+#define rtcomSetParam(v)   rtcomXfer(0x6C, (v))
+#define rtcomStatus()      rtcomXfer(0x6F, -1)       // register "113"
+#define rtcomSetRequest(v) rtcomXfer(0x6E, (v))
+
+static bool rtcomWait(u8 status, int timeout) {
+	do {
+		if (REG_IF & IRQ_NETWORK) {
+			REG_IF = IRQ_NETWORK;
+			return rtcomStatus() == status;
+		}
+	} while (--timeout);
+	REG_IF = IRQ_NETWORK;
+	return false;
+}
+
+static bool rtcomRequest(u8 request, u8 param) {
+	rtcomSetParam(param);
+	rtcomSetRequest(request);
+	return rtcomWait(RTCOM_ACK, 1000000);
+}
+
+static void rtcomBegin(void) {
+	raUcRcnt = RA_RCNT;
+	REG_IF = IRQ_NETWORK;
+	RA_RCNT = 0x8100; // the ARM11's answers raise the SIO interrupt flag
+	REG_IF = IRQ_NETWORK;
+}
+
+static void rtcomEnd(void) {
+	rtcomSetRequest(RTCOM_KILL);
+	rtcomWait(RTCOM_READY, 1000000);
+	rtcomSetRequest(RTCOM_DONE);
+	REG_IF = IRQ_NETWORK;
+	RA_RCNT = raUcRcnt;
+}
+
+// Runs a command of our ARM11 program; its answer, or -1
+static int raUcCall(u8 command) {
+	return rtcomRequest(RTCOM_EXECUTE, command) ? rtcomData() : -1;
+}
+
+static void raUcSetUp(void) {
+	rtcomBegin();
+	// Anyone there?  (TwlBg without RTCom: no answer, short wait)
+	bool answered = false;
+	for (int i = 0; i < 3 && !answered; i++) {
+		rtcomSetRequest(1);
+		answered = rtcomWait(RTCOM_DONE, 200000);
+	}
+	int ready = 0;
+	if (answered) {
+		rtcomSetRequest(RTCOM_KILL);
+		rtcomWait(RTCOM_READY, 1000000);
+		if (raUcCall(RA_UC_HELLO) == RA_UC_MAGIC) {
+			ready = 1; // still there from the last game
+		} else {
+			rtcomSetRequest(RTCOM_KILL);
+			rtcomWait(RTCOM_READY, 1000000);
+			const u32 len = sizeof(raUc11);
+			bool ok = rtcomRequest(RTCOM_UPLOAD, len & 0xFF)
+			       && rtcomRequest(RTCOM_NEXT, (len >> 8) & 0xFF)
+			       && rtcomRequest(RTCOM_NEXT, (len >> 16) & 0xFF)
+			       && rtcomRequest(RTCOM_NEXT, (len >> 24) & 0xFF);
+			for (u32 i = 0; ok && i < len; i++) {
+				ok = rtcomRequest(RTCOM_NEXT, raUc11[i]);
+			}
+			ok = ok && rtcomRequest(RTCOM_FINISH, 0);
+			if (ok) {
+				rtcomSetRequest(RTCOM_KILL);
+				rtcomWait(RTCOM_READY, 1000000);
+				ready = raUcCall(RA_UC_HELLO) == RA_UC_MAGIC;
+			}
+		}
+	}
+	rtcomEnd();
+	raUcState = ready ? 1 : -1;
+	if (raNet) {
+		raNetLog(ready ? "[ce] 3DS LED ready\n" : answered ? "[ce] 3DS LED: upload failed\n" : "[ce] 3DS LED: no RTCom\n",
+			ready ? 19 : answered ? 28 : 23);
+	}
+}
+
+// Game idle time (raIdle), 3DS only
+static void raUcIdle(void) {
+	static bool busy = false;
+	if (consoleModel < 2 || raUcState < 0 || busy || raInFrame || raState != 1 || sharedAddr[3] != 0) {
+		return;
+	}
+	busy = true;
+	if (raUcState == 0) {
+		if (raFrame > 60*3) {
+			raUcSetUp();
+		}
+	} else if (raLedPending) {
+		raLedPending = false;
+		rtcomBegin();
+		raUcCall(RA_UC_LED);
+		rtcomEnd();
+	}
+	busy = false;
+}
+
 static int raComboFrames = 0;
 
 // Game idle time (SWI Halt hook): one evaluation per VBlank at most, and
 // none while ARM9 waits for a ROM read
 static void raIdle(void) {
 	raNetIdle();
+	raUcIdle();
 	if (raInFrame || raState != 1 || raFramesDue == 0 || sharedAddr[3] != 0) {
 		return;
 	}
