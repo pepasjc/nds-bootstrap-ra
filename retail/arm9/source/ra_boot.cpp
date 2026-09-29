@@ -433,6 +433,141 @@ static bool romMatchesId(const char* fingerprint, const char* idPath) {
 	return strcmp(fingerprint, expected) == 0;
 }
 
+// ---------------------------------------------------------------------------
+// 3DS hand-off.  No Unlaunch there, so RA Prep and RA Sync are started by
+// TWiLight Menu++'s "autorun last game" (settings.ini AUTORUNGAME, ROM_PATH,
+// LAUNCH_TYPE, PREVIOUS_USED_DEVICE), and each step restarts into TWiLight
+// Menu++'s title (TLNC, title id from srBackendId.bin), as quitting a game
+// already does there.  The user's own values of those settings are kept in
+// twl_restore.txt, which RA Sync (ra-nds ra_twl.c, same format) puts back.
+// ---------------------------------------------------------------------------
+
+#define TWL_SETTINGS "sd:/_nds/TWiLightMenu/settings.ini"
+#define RA_TWL_RESTORE RA_DIR "/twl_restore.txt"
+static const char* const twlKeys[] = {"AUTORUNGAME", "ROM_PATH", "LAUNCH_TYPE", "PREVIOUS_USED_DEVICE"};
+
+static bool twlKeyLine(const std::string& line, const char* key) {
+	const size_t n = strlen(key);
+	return line.compare(0, n, key) == 0 && line.size() > n && (line[n] == ' ' || line[n] == '=');
+}
+
+static std::string twlValue(const std::string& line) {
+	size_t eq = line.find('=');
+	if (eq == std::string::npos) return "";
+	size_t start = line.find_first_not_of(' ', eq + 1);
+	if (start == std::string::npos) return "";
+	size_t end = line.find_last_not_of(" \r\n");
+	return line.substr(start, end + 1 - start);
+}
+
+static bool readLines(const char* path, std::vector<std::string>& lines) {
+	FILE* f = fopen(path, "rb");
+	if (!f) return false;
+	char buf[512];
+	while (fgets(buf, sizeof(buf), f)) lines.push_back(buf);
+	fclose(f);
+	return true;
+}
+
+// Sets the four autorun keys (added under [SRLOADER] if missing).  The
+// user's values are saved first, once per chain.
+static bool twlAutorun(const char* rom, bool throughBootstrap) {
+	std::vector<std::string> lines;
+	if (!readLines(TWL_SETTINGS, lines)) return false;
+	struct stat st;
+	if (stat(RA_TWL_RESTORE, &st) != 0) {
+		FILE* f = fopen(RA_TWL_RESTORE, "wb");
+		for (int k = 0; f && k < 4; k++) {
+			std::string value;
+			for (const std::string& line : lines) {
+				if (twlKeyLine(line, twlKeys[k])) { value = twlValue(line); break; }
+			}
+			fprintf(f, "%s=%s\n", twlKeys[k], value.c_str());
+		}
+		if (f) fclose(f);
+	}
+	const std::string values[4] = {"1", rom, throughBootstrap ? "1" : "2", "0"};
+	bool done[4] = {false, false, false, false};
+	std::string out;
+	for (const std::string& line : lines) {
+		bool replaced = false;
+		for (int k = 0; k < 4 && !replaced; k++) {
+			if (!done[k] && twlKeyLine(line, twlKeys[k])) {
+				out += std::string(twlKeys[k]) + " = " + values[k] + "\r\n";
+				done[k] = replaced = true;
+			}
+		}
+		if (!replaced) out += line;
+	}
+	for (int k = 0; k < 4; k++) {
+		if (done[k]) continue;
+		size_t at = out.find("[SRLOADER]");
+		if (at == std::string::npos) return false;
+		at = out.find('\n', at);
+		out.insert(at == std::string::npos ? out.size() : at + 1, std::string(twlKeys[k]) + " = " + values[k] + "\r\n");
+	}
+	FILE* f = fopen(TWL_SETTINGS, "wb");
+	if (!f) return false;
+	const bool ok = fwrite(out.data(), 1, out.size(), f) == out.size();
+	return fclose(f) == 0 && ok;
+}
+
+// The user's autorun values back, if a chain saved them
+static void twlRestore(void) {
+	std::vector<std::string> saved, lines;
+	if (!readLines(RA_TWL_RESTORE, saved) || !readLines(TWL_SETTINGS, lines)) return;
+	std::string out;
+	for (const std::string& line : lines) {
+		bool replaced = false;
+		for (const std::string& s : saved) {
+			size_t eq = s.find('=');
+			if (eq == std::string::npos) continue;
+			std::string key = s.substr(0, eq);
+			if (twlKeyLine(line, key.c_str())) {
+				std::string value = s.substr(eq + 1);
+				value.erase(value.find_last_not_of("\r\n") + 1);
+				out += key + " = " + value + "\r\n";
+				replaced = true;
+				break;
+			}
+		}
+		if (!replaced) out += line;
+	}
+	FILE* f = fopen(TWL_SETTINGS, "wb");
+	if (f && fwrite(out.data(), 1, out.size(), f) == out.size() && fclose(f) == 0) {
+		remove(RA_TWL_RESTORE);
+	} else if (f) {
+		fclose(f);
+	}
+}
+
+// Restarts the console into TWiLight Menu++'s title: TLNC launcher
+// parameters (as the card engine's readSoftResetId), then the loader ARM7
+// resets (the 'RBOT' mailbox).  Returns only without a title id.
+static void rebootToTwilight(void) {
+	u32 id[2] = {0, 0};
+	FILE* f = fopen("sd:/_nds/nds-bootstrap/srBackendId.bin", "rb");
+	if (!f) return;
+	const bool ok = fread(id, sizeof(u32), 2, f) == 2;
+	fclose(f);
+	if (!ok || (!id[0] && !id[1])) return;
+	*(u32*)0x02000300 = 0x434E4C54; // 'TLNC'
+	*(u16*)0x02000304 = 0x1801;
+	*(u32*)0x02000308 = 0;
+	*(u32*)0x0200030C = 0;
+	*(u32*)0x02000310 = id[0];
+	*(u32*)0x02000314 = id[1];
+	*(u32*)0x02000318 = (id[1] == 0x00030000) ? 0x13 : 0x17;
+	*(u32*)0x0200031C = 0;
+	*(u16*)0x02000306 = swiCRC16(0xFFFF, (void*)0x02000308, 0x18);
+	DC_FlushAll();
+	*(vu32*)0x0CFFFD0C = 0x544F4252; // 'RBOT' (retail/arm7/source/main.c)
+	fifoSendValue32(FIFO_USER_08, 0);
+	while (1) {
+		swiDelay(100);
+	}
+}
+
 // A game with no achievement set yet goes through RA Prep first: the loader
 // saves the game's path in prep.txt and restarts the console into
 // raprep.nds (through Unlaunch, in full DSi mode for WPA2), which looks the
@@ -443,9 +578,10 @@ static bool romMatchesId(const char* fingerprint, const char* idPath) {
 // none yet) goes through RA Prep too, which hashes the ROM again and keeps
 // or replaces the set.  Only returns when the game should just start.
 void raRedirectPrep(configuration* conf, const char* bootstrapPath) {
-	// Not on a 3DS (console model 2 and up): no Unlaunch to restart through.
-	// There RA Tool prepares the sets.
-	if (!conf->ndsPath || strncmp(conf->ndsPath, "sd:/", 4) != 0 || !isDSiMode() || conf->consoleModel >= 2) {
+	// On a 3DS (console model 2 and up) through TWiLight Menu++'s autorun
+	// instead of Unlaunch (see "3DS hand-off" above)
+	const bool on3ds = conf->consoleModel >= 2;
+	if (!conf->ndsPath || strncmp(conf->ndsPath, "sd:/", 4) != 0 || !isDSiMode()) {
 		return;
 	}
 	struct stat st;
@@ -481,16 +617,24 @@ void raRedirectPrep(configuration* conf, const char* bootstrapPath) {
 		return;
 	}
 
-	// ROM, loader to start again, fingerprint for <rom>.id
+	// ROM, loader to start again, fingerprint for <rom>.id, "3ds" on a 3DS
 	f = fopen(RA_PREP_FILE, "wb");
 	if (!f) {
 		return;
 	}
-	fprintf(f, "%s\n%s\n%s\n", conf->ndsPath,
+	fprintf(f, "%s\n%s\n%s\n%s\n", conf->ndsPath,
 		strncmp(bootstrapPath, "sd:/", 4) == 0 ? bootstrapPath : "sd:/_nds/nds-bootstrap-nightly.nds",
-		fingerprint);
+		fingerprint, on3ds ? "3ds" : "");
 	fclose(f);
 
+	if (on3ds) {
+		// TWiLight Menu++ runs raprep.nds next; RA Prep points it back at the game
+		if (twlAutorun(RA_PREP_PATH, false)) {
+			rebootToTwilight();
+		}
+		remove(RA_PREP_FILE); // no way there: just play
+		return;
+	}
 	unlaunchAutoload(RA_PREP_PATH);
 	// The ARM7 restarts the console (retail/arm7/source/main.c); the FIFO
 	// message only wakes it up
@@ -507,9 +651,8 @@ void raRedirectPrep(configuration* conf, const char* bootstrapPath) {
 // Quitting boots the quit path through Unlaunch in full DSi mode, which the
 // DSi WiFi (WPA2) needs.
 void raRedirectQuit(configuration* conf) {
-	// Not on a 3DS either (RA Sync returns through Unlaunch); there RA Tool
-	// sends the unlocks
-	if (!conf->ndsPath || strncmp(conf->ndsPath, "sd:/", 4) != 0 || conf->consoleModel >= 2
+	const bool on3ds = conf->consoleModel >= 2;
+	if (!conf->ndsPath || strncmp(conf->ndsPath, "sd:/", 4) != 0
 	 || !conf->quitPath || !conf->quitPath[0] || strcmp(conf->quitPath, RA_SYNC_PATH) == 0) {
 		return;
 	}
@@ -533,14 +676,24 @@ void raRedirectQuit(configuration* conf) {
 	const std::string setPath = std::string(RA_DIR "/sets/") + name + ".txt";
 	struct stat st;
 	if ((!afterPrep && stat(setPath.c_str(), &st) != 0) || stat(RA_SYNC_PATH, &st) != 0) {
+		if (on3ds) {
+			twlRestore(); // a chain from RA Prep ends here for a game without a set
+		}
 		return;
 	}
 	f = fopen(RA_RETURN_PATH, "wb");
 	if (!f) {
 		return;
 	}
-	// The quit target, then the game (RA Sync refreshes its account unlocks)
-	fprintf(f, "%s\n%s\n", conf->quitPath, conf->ndsPath);
+	// The quit target, then the game (RA Sync refreshes its account unlocks),
+	// then "3ds" on a 3DS
+	fprintf(f, "%s\n%s\n%s\n", conf->quitPath, conf->ndsPath, on3ds ? "3ds" : "");
 	fclose(f);
+	if (on3ds) {
+		// Quitting restarts into TWiLight Menu++ as usual there; its autorun
+		// then runs RA Sync, which puts the user's settings back
+		twlAutorun(RA_SYNC_PATH, false);
+		return;
+	}
 	conf->quitPath = strdup(RA_SYNC_PATH);
 }
