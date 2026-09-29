@@ -2354,13 +2354,10 @@ static void raUcSetUp(void) {
 	}
 	int ready = 0;
 	if (answered) {
-		rtcomSetRequest(RTCOM_KILL);
-		rtcomWait(RTCOM_READY, 1000000);
-		if (raUcCall(RA_UC_HELLO) == RA_UC_MAGIC) {
-			ready = 1; // still there from the last game
-		} else {
-			rtcomSetRequest(RTCOM_KILL);
-			rtcomWait(RTCOM_READY, 1000000);
+		// Always uploaded, never run first to see if it's still there:
+		// after a 3DS restart TwlBg has nothing loaded, and running that
+		// crashed it (a hard freeze, HOME menu included)
+		{
 			const u32 len = sizeof(raUc11);
 			bool ok = rtcomRequest(RTCOM_UPLOAD, len & 0xFF)
 			       && rtcomRequest(RTCOM_NEXT, (len >> 8) & 0xFF)
