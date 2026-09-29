@@ -771,8 +771,8 @@ static void rebootToTwilight(void) {
 // or replaces the set.  Only returns when the game should just start.
 // Real-time upload (ranet.bin) needs RA Sync's WiFi profile (net.bin) and a
 // TLS session it can still resume (tls.bin, 18 hours): renewed by RA Prep
-// when missing or with less than 6 hours left.  Not again within 6 hours of
-// an attempt (net_tried.txt, RA Prep): without WiFi every start would wait.
+// when missing or with less than 6 hours left.  Without a connection RA
+// Prep asks the player whether to try again or play without it.
 #define RA_NET_RENEW_MARGIN (6 * 3600)
 static bool netRefreshWanted(void) {
 	struct stat st;
@@ -780,20 +780,11 @@ static bool netRefreshWanted(void) {
 		return false;
 	}
 	const time_t now = time(NULL);
-	FILE* f = fopen(RA_DIR "/net_tried.txt", "rb");
-	if (f) {
-		unsigned long tried = 0;
-		const bool got = fscanf(f, "%lu", &tried) == 1;
-		fclose(f);
-		if (got && now >= (time_t)tried && now - (time_t)tried < RA_NET_RENEW_MARGIN) {
-			return false;
-		}
-	}
 	if (stat(RA_DIR "/net.bin", &st) != 0) {
 		return true;
 	}
 	RaTlsSession tls;
-	f = fopen(RA_DIR "/tls.bin", "rb");
+	FILE* f = fopen(RA_DIR "/tls.bin", "rb");
 	const bool haveTls = f && fread(&tls, sizeof(tls), 1, f) == 1 && tls.magic == RA_TLS_SESSION_MAGIC;
 	if (f) {
 		fclose(f);
